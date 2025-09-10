@@ -29,8 +29,9 @@ import org.apache.paimon.compact.NoopCompactManager;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.data.serializer.RowCompactedSerializer;
+import org.apache.paimon.deletionvectors.BucketedDvMaintainer;
 import org.apache.paimon.deletionvectors.DeletionVector;
-import org.apache.paimon.deletionvectors.DeletionVectorsMaintainer;
+import org.apache.paimon.disk.IOManager;
 import org.apache.paimon.format.FileFormatDiscover;
 import org.apache.paimon.fs.FileIO;
 import org.apache.paimon.index.DynamicBucketIndexMaintainer;
@@ -53,12 +54,15 @@ import org.apache.paimon.mergetree.compact.CompactRewriter;
 import org.apache.paimon.mergetree.compact.CompactStrategy;
 import org.apache.paimon.mergetree.compact.ForceUpLevel0Compaction;
 import org.apache.paimon.mergetree.compact.FullChangelogMergeTreeCompactRewriter;
+import org.apache.paimon.mergetree.compact.FullCompactTrigger;
+import org.apache.paimon.mergetree.compact.LookupMergeFunction;
 import org.apache.paimon.mergetree.compact.LookupMergeTreeCompactRewriter;
 import org.apache.paimon.mergetree.compact.LookupMergeTreeCompactRewriter.FirstRowMergeFunctionWrapperFactory;
 import org.apache.paimon.mergetree.compact.LookupMergeTreeCompactRewriter.LookupMergeFunctionWrapperFactory;
 import org.apache.paimon.mergetree.compact.MergeFunctionFactory;
 import org.apache.paimon.mergetree.compact.MergeTreeCompactManager;
 import org.apache.paimon.mergetree.compact.MergeTreeCompactRewriter;
+import org.apache.paimon.mergetree.compact.OffPeakHours;
 import org.apache.paimon.mergetree.compact.UniversalCompaction;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.schema.KeyValueFieldsExtractor;
@@ -104,7 +108,6 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
     private final Supplier<RecordEqualiser> logDedupEqualSupplier;
     private final MergeFunctionFactory<KeyValue> mfFactory;
     private final CoreOptions options;
-    private final FileIO fileIO;
     private final RowType keyType;
     private final RowType valueType;
     private final RowType partitionType;
@@ -129,7 +132,7 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
             SnapshotManager snapshotManager,
             FileStoreScan scan,
             @Nullable DynamicBucketIndexMaintainer.Factory dbMaintainerFactory,
-            @Nullable DeletionVectorsMaintainer.Factory dvMaintainerFactory,
+            @Nullable BucketedDvMaintainer.Factory dvMaintainerFactory,
             CoreOptions options,
             KeyValueFieldsExtractor extractor,
             String tableName) {
@@ -141,7 +144,6 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
                 dbMaintainerFactory,
                 dvMaintainerFactory,
                 tableName);
-        this.fileIO = fileIO;
         this.partitionType = partitionType;
         this.keyType = keyType;
         this.valueType = valueType;
@@ -176,6 +178,15 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
     }
 
     @Override
+    public KeyValueFileStoreWrite withIOManager(IOManager ioManager) {
+        super.withIOManager(ioManager);
+        if (mfFactory instanceof LookupMergeFunction.Factory) {
+            ((LookupMergeFunction.Factory) mfFactory).withIOManager(ioManager);
+        }
+        return this;
+    }
+
+    @Override
     protected MergeTreeWriter createWriter(
             BinaryRow partition,
             int bucket,
@@ -183,7 +194,7 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
             long restoredMaxSeqNumber,
             @Nullable CommitIncrement restoreIncrement,
             ExecutorService compactExecutor,
-            @Nullable DeletionVectorsMaintainer dvMaintainer) {
+            @Nullable BucketedDvMaintainer dvMaintainer) {
         if (LOG.isDebugEnabled()) {
             LOG.debug(
                     "Creating merge tree writer for partition {} bucket {} from restored files {}",
@@ -220,25 +231,22 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
 
     private CompactStrategy createCompactStrategy(CoreOptions options) {
         if (options.needLookup()) {
-            if (CoreOptions.LookupCompactMode.RADICAL.equals(options.lookupCompact())) {
-                return new ForceUpLevel0Compaction(
-                        new UniversalCompaction(
-                                options.maxSizeAmplificationPercent(),
-                                options.sortedRunSizeRatio(),
-                                options.numSortedRunCompactionTrigger(),
-                                options.optimizedCompactionInterval(),
-                                options.offPeakHours(),
-                                options.compactOffPeakRatio()));
-            } else if (CoreOptions.LookupCompactMode.GENTLE.equals(options.lookupCompact())) {
-                return new UniversalCompaction(
-                        options.maxSizeAmplificationPercent(),
-                        options.sortedRunSizeRatio(),
-                        options.numSortedRunCompactionTrigger(),
-                        options.optimizedCompactionInterval(),
-                        options.lookupCompactMaxInterval(),
-                        options.offPeakHours(),
-                        options.compactOffPeakRatio());
+            Integer compactMaxInterval = null;
+            switch (options.lookupCompact()) {
+                case GENTLE:
+                    compactMaxInterval = options.lookupCompactMaxInterval();
+                    break;
+                case RADICAL:
+                    break;
             }
+            return new ForceUpLevel0Compaction(
+                    new UniversalCompaction(
+                            options.maxSizeAmplificationPercent(),
+                            options.sortedRunSizeRatio(),
+                            options.numSortedRunCompactionTrigger(),
+                            FullCompactTrigger.create(options),
+                            OffPeakHours.create(options)),
+                    compactMaxInterval);
         }
 
         UniversalCompaction universal =
@@ -246,11 +254,10 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
                         options.maxSizeAmplificationPercent(),
                         options.sortedRunSizeRatio(),
                         options.numSortedRunCompactionTrigger(),
-                        options.optimizedCompactionInterval(),
-                        options.offPeakHours(),
-                        options.compactOffPeakRatio());
+                        FullCompactTrigger.create(options),
+                        OffPeakHours.create(options));
         if (options.compactionForceUpLevel0()) {
-            return new ForceUpLevel0Compaction(universal);
+            return new ForceUpLevel0Compaction(universal, null);
         } else {
             return universal;
         }
@@ -262,7 +269,7 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
             CompactStrategy compactStrategy,
             ExecutorService compactExecutor,
             Levels levels,
-            @Nullable DeletionVectorsMaintainer dvMaintainer) {
+            @Nullable BucketedDvMaintainer dvMaintainer) {
         if (options.writeOnly()) {
             return new NoopCompactManager();
         } else {
@@ -301,7 +308,7 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
             Comparator<InternalRow> keyComparator,
             @Nullable FieldsComparator userDefinedSeqComparator,
             Levels levels,
-            @Nullable DeletionVectorsMaintainer dvMaintainer) {
+            @Nullable BucketedDvMaintainer dvMaintainer) {
         DeletionVector.Factory dvFactory = DeletionVector.factory(dvMaintainer);
         FileReaderFactory<KeyValue> readerFactory =
                 readerFactoryBuilder.build(partition, bucket, dvFactory);

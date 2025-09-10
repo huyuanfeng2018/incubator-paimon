@@ -101,7 +101,7 @@ public class ManifestCommittableSerializerTest {
     }
 
     public static DataFileMeta newFile(int name, int level) {
-        return new DataFileMeta(
+        return DataFileMeta.create(
                 String.valueOf(name),
                 0,
                 1,
@@ -116,6 +116,8 @@ public class ManifestCommittableSerializerTest {
                 0L,
                 null,
                 FileSource.APPEND,
+                null,
+                null,
                 null);
     }
 }

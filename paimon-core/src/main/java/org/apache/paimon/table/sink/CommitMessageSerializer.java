@@ -20,13 +20,16 @@ package org.apache.paimon.table.sink;
 
 import org.apache.paimon.data.serializer.VersionedSerializer;
 import org.apache.paimon.index.IndexFileMeta;
-import org.apache.paimon.index.IndexFileMeta09Serializer;
 import org.apache.paimon.index.IndexFileMetaSerializer;
+import org.apache.paimon.index.IndexFileMetaV1Deserializer;
+import org.apache.paimon.index.IndexFileMetaV2Deserializer;
 import org.apache.paimon.io.CompactIncrement;
 import org.apache.paimon.io.DataFileMeta;
 import org.apache.paimon.io.DataFileMeta08Serializer;
 import org.apache.paimon.io.DataFileMeta09Serializer;
 import org.apache.paimon.io.DataFileMeta10LegacySerializer;
+import org.apache.paimon.io.DataFileMeta12LegacySerializer;
+import org.apache.paimon.io.DataFileMetaFirstRowIdLegacySerializer;
 import org.apache.paimon.io.DataFileMetaSerializer;
 import org.apache.paimon.io.DataIncrement;
 import org.apache.paimon.io.DataInputDeserializer;
@@ -48,15 +51,18 @@ import static org.apache.paimon.utils.SerializationUtils.serializeBinaryRow;
 /** {@link VersionedSerializer} for {@link CommitMessage}. */
 public class CommitMessageSerializer implements VersionedSerializer<CommitMessage> {
 
-    private static final int CURRENT_VERSION = 7;
+    private static final int CURRENT_VERSION = 9;
 
     private final DataFileMetaSerializer dataFileSerializer;
     private final IndexFileMetaSerializer indexEntrySerializer;
 
+    private DataFileMetaFirstRowIdLegacySerializer dataFileMetaFirstRowIdLegacySerializer;
+    private DataFileMeta12LegacySerializer dataFileMeta12LegacySerializer;
     private DataFileMeta10LegacySerializer dataFileMeta10LegacySerializer;
     private DataFileMeta09Serializer dataFile09Serializer;
     private DataFileMeta08Serializer dataFile08Serializer;
-    private IndexFileMeta09Serializer indexEntry09Serializer;
+    private IndexFileMetaV1Deserializer indexEntryV1Deserializer;
+    private IndexFileMetaV2Deserializer indexEntryV2Deserializer;
 
     public CommitMessageSerializer() {
         this.dataFileSerializer = new DataFileMetaSerializer();
@@ -142,8 +148,19 @@ public class CommitMessageSerializer implements VersionedSerializer<CommitMessag
 
     private IOExceptionSupplier<List<DataFileMeta>> fileDeserializer(
             int version, DataInputView view) {
-        if (version >= 6) {
+        if (version >= 9) {
             return () -> dataFileSerializer.deserializeList(view);
+        } else if (version == 8) {
+            if (dataFileMetaFirstRowIdLegacySerializer == null) {
+                dataFileMetaFirstRowIdLegacySerializer =
+                        new DataFileMetaFirstRowIdLegacySerializer();
+            }
+            return () -> dataFileMetaFirstRowIdLegacySerializer.deserializeList(view);
+        } else if (version == 6 || version == 7) {
+            if (dataFileMeta12LegacySerializer == null) {
+                dataFileMeta12LegacySerializer = new DataFileMeta12LegacySerializer();
+            }
+            return () -> dataFileMeta12LegacySerializer.deserializeList(view);
         } else if (version == 4 || version == 5) {
             if (dataFileMeta10LegacySerializer == null) {
                 dataFileMeta10LegacySerializer = new DataFileMeta10LegacySerializer();
@@ -164,13 +181,18 @@ public class CommitMessageSerializer implements VersionedSerializer<CommitMessag
 
     private IOExceptionSupplier<List<IndexFileMeta>> indexEntryDeserializer(
             int version, DataInputView view) {
-        if (version >= 5) {
+        if (version >= 9) {
             return () -> indexEntrySerializer.deserializeList(view);
-        } else {
-            if (indexEntry09Serializer == null) {
-                indexEntry09Serializer = new IndexFileMeta09Serializer();
+        } else if (version >= 5) {
+            if (indexEntryV2Deserializer == null) {
+                indexEntryV2Deserializer = new IndexFileMetaV2Deserializer();
             }
-            return () -> indexEntry09Serializer.deserializeList(view);
+            return () -> indexEntryV2Deserializer.deserializeList(view);
+        } else {
+            if (indexEntryV1Deserializer == null) {
+                indexEntryV1Deserializer = new IndexFileMetaV1Deserializer();
+            }
+            return () -> indexEntryV1Deserializer.deserializeList(view);
         }
     }
 }

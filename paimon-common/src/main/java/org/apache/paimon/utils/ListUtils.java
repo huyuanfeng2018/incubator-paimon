@@ -18,6 +18,7 @@
 
 package org.apache.paimon.utils;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 
@@ -30,5 +31,9 @@ public class ListUtils {
         checkArgument(!list.isEmpty(), "list is empty");
         int index = ThreadLocalRandom.current().nextInt(list.size());
         return list.get(index);
+    }
+
+    public static <T> boolean isNullOrEmpty(Collection<T> list) {
+        return list == null || list.isEmpty();
     }
 }

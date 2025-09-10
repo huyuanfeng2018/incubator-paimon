@@ -39,7 +39,6 @@ import static org.apache.flink.table.factories.FactoryUtil.CONNECTOR;
 import static org.apache.flink.table.factories.FactoryUtil.FORMAT;
 import static org.apache.flink.table.types.utils.TypeConversions.fromLogicalToDataType;
 import static org.apache.paimon.flink.LogicalTypeConversion.toLogicalType;
-import static org.apache.paimon.table.FormatTableOptions.FIELD_DELIMITER;
 
 /** A {@link CatalogTable} to represent format table. */
 public class FormatCatalogTable implements CatalogTable {
@@ -99,8 +98,8 @@ public class FormatCatalogTable implements CatalogTable {
                             cachedOptions.put(k, v);
                         }
                     });
-            if (options.containsKey(FIELD_DELIMITER.key())) {
-                cachedOptions.put("csv.field-delimiter", options.get(FIELD_DELIMITER.key()));
+            if (options.containsKey("field-delimiter")) {
+                cachedOptions.put("csv.field-delimiter", "field-delimiter");
             }
             cachedOptions.put(CONNECTOR.key(), "filesystem");
             cachedOptions.put(PATH.key(), table.location());

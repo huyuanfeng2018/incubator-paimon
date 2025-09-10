@@ -73,12 +73,12 @@ public abstract class ManifestFileMetaTestBase {
             binaryRow = BinaryRow.EMPTY_ROW;
         }
 
-        return new ManifestEntry(
+        return ManifestEntry.create(
                 isAdd ? FileKind.ADD : FileKind.DELETE,
                 binaryRow,
                 0, // not used
                 0, // not used
-                new DataFileMeta(
+                DataFileMeta.create(
                         fileName,
                         0, // not used
                         0, // not used
@@ -95,6 +95,8 @@ public abstract class ManifestFileMetaTestBase {
                         0L, // not used
                         embeddedIndex, // not used
                         FileSource.APPEND,
+                        null,
+                        null,
                         null,
                         null));
     }
@@ -148,11 +150,12 @@ public abstract class ManifestFileMetaTestBase {
                                 CoreOptions.FILE_FORMAT.defaultValue(),
                                 CoreOptions.DATA_FILE_PREFIX.defaultValue(),
                                 CoreOptions.CHANGELOG_FILE_PREFIX.defaultValue(),
-                                CoreOptions.PARTITION_GENERATE_LEGCY_NAME.defaultValue(),
+                                CoreOptions.PARTITION_GENERATE_LEGACY_NAME.defaultValue(),
                                 CoreOptions.FILE_SUFFIX_INCLUDE_COMPRESSION.defaultValue(),
                                 CoreOptions.FILE_COMPRESSION.defaultValue(),
                                 null,
-                                null),
+                                null,
+                                false),
                         Long.MAX_VALUE,
                         null)
                 .create();
@@ -260,12 +263,12 @@ public abstract class ManifestFileMetaTestBase {
 
     public static ManifestEntry makeEntry(
             FileKind fileKind, int partition, int bucket, long rowCount) {
-        return new ManifestEntry(
+        return ManifestEntry.create(
                 fileKind,
                 row(partition),
                 bucket,
                 0, // not used
-                new DataFileMeta(
+                DataFileMeta.create(
                         "", // not used
                         0, // not used
                         rowCount,
@@ -280,6 +283,8 @@ public abstract class ManifestFileMetaTestBase {
                         0L,
                         null,
                         FileSource.APPEND,
+                        null,
+                        null,
                         null));
     }
 }

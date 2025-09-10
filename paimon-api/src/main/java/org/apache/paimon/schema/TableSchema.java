@@ -28,6 +28,7 @@ import org.apache.paimon.utils.StringUtils;
 import javax.annotation.Nullable;
 
 import java.io.Serializable;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
@@ -106,7 +107,7 @@ public class TableSchema implements Serializable {
             long timeMillis) {
         this.version = version;
         this.id = id;
-        this.fields = fields;
+        this.fields = Collections.unmodifiableList(new ArrayList<>(fields));
         this.highestFieldId = highestFieldId;
         this.partitionKeys = partitionKeys;
         this.primaryKeys = primaryKeys;
@@ -142,6 +143,16 @@ public class TableSchema implements Serializable {
         return fields.stream().map(DataField::name).collect(Collectors.toList());
     }
 
+    public Map<String, DataField> nameToFieldMap() {
+        return fields.stream()
+                .collect(Collectors.toMap(DataField::name, field -> field, (a, b) -> b));
+    }
+
+    public Map<Integer, DataField> idToFieldMap() {
+        return fields.stream()
+                .collect(Collectors.toMap(DataField::id, field -> field, (a, b) -> b));
+    }
+
     public int highestFieldId() {
         return highestFieldId;
     }
@@ -155,14 +166,14 @@ public class TableSchema implements Serializable {
     }
 
     public List<String> trimmedPrimaryKeys() {
-        if (primaryKeys.size() > 0) {
+        if (!primaryKeys.isEmpty()) {
             List<String> adjusted =
                     primaryKeys.stream()
                             .filter(pk -> !partitionKeys.contains(pk))
                             .collect(Collectors.toList());
 
             Preconditions.checkState(
-                    adjusted.size() > 0,
+                    !adjusted.isEmpty(),
                     String.format(
                             "Primary key constraint %s should not be same with partition fields %s,"
                                     + " this will result in only one record in a partition",
@@ -191,7 +202,7 @@ public class TableSchema implements Serializable {
             return false;
         }
 
-        return !primaryKeys.containsAll(partitionKeys);
+        return notContainsAll(primaryKeys, partitionKeys);
     }
 
     /** Original bucket keys, maybe empty. */
@@ -201,7 +212,7 @@ public class TableSchema implements Serializable {
             return Collections.emptyList();
         }
         List<String> bucketKeys = Arrays.asList(key.split(","));
-        if (!containsAll(fieldNames(), bucketKeys)) {
+        if (notContainsAll(fieldNames(), bucketKeys)) {
             throw new RuntimeException(
                     String.format(
                             "Field names %s should contains all bucket keys %s.",
@@ -213,8 +224,8 @@ public class TableSchema implements Serializable {
                             "Bucket keys %s should not in partition keys %s.",
                             bucketKeys, partitionKeys));
         }
-        if (primaryKeys.size() > 0) {
-            if (!containsAll(primaryKeys, bucketKeys)) {
+        if (!primaryKeys.isEmpty()) {
+            if (notContainsAll(primaryKeys, bucketKeys)) {
                 throw new RuntimeException(
                         String.format(
                                 "Primary keys %s should contains all bucket keys %s.",
@@ -224,8 +235,8 @@ public class TableSchema implements Serializable {
         return bucketKeys;
     }
 
-    private boolean containsAll(List<String> all, List<String> contains) {
-        return new HashSet<>(all).containsAll(new HashSet<>(contains));
+    private boolean notContainsAll(List<String> all, List<String> contains) {
+        return !new HashSet<>(all).containsAll(new HashSet<>(contains));
     }
 
     public @Nullable String comment() {
@@ -267,6 +278,23 @@ public class TableSchema implements Serializable {
     public int[] projection(List<String> projectedFieldNames) {
         List<String> fieldNames = fieldNames();
         return projectedFieldNames.stream().mapToInt(fieldNames::indexOf).toArray();
+    }
+
+    public TableSchema project(@Nullable List<String> writeCols) {
+        if (writeCols == null || writeCols.isEmpty()) {
+            return this;
+        }
+
+        return new TableSchema(
+                version,
+                id,
+                new RowType(fields).project(writeCols).getFields(),
+                highestFieldId,
+                partitionKeys,
+                primaryKeys,
+                options,
+                comment,
+                timeMillis);
     }
 
     private List<DataField> projectedDataFields(List<String> projectedFieldNames) {

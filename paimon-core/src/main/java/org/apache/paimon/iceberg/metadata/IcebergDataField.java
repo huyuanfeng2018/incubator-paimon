@@ -150,6 +150,8 @@ public class IcebergDataField {
             case BOOLEAN:
                 return "boolean";
             case INTEGER:
+            case TINYINT:
+            case SMALLINT:
                 return "int";
             case BIGINT:
                 return "long";
@@ -273,13 +275,13 @@ public class IcebergDataField {
                 IcebergListType listType = (IcebergListType) icebergType;
                 return new ArrayType(
                         !isRequired,
-                        getDataTypeFromType(listType.element(), !listType.elementRequired()));
+                        getDataTypeFromType(listType.element(), listType.elementRequired()));
             } else if (icebergType instanceof IcebergMapType) {
                 IcebergMapType mapType = (IcebergMapType) icebergType;
                 return new MapType(
                         !isRequired,
                         getDataTypeFromType(mapType.key(), true),
-                        getDataTypeFromType(mapType.value(), !mapType.valueRequired()));
+                        getDataTypeFromType(mapType.value(), mapType.valueRequired()));
             } else if (icebergType instanceof IcebergStructType) {
                 IcebergStructType structType = (IcebergStructType) icebergType;
                 return new RowType(

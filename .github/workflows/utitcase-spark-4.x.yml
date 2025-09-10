@@ -24,9 +24,12 @@ on:
     paths-ignore:
       - 'docs/**'
       - '**/*.md'
+      - 'paimon-python/**'
+      - '.github/workflows/paimon-python-checks.yml'
 
 env:
   JDK_VERSION: 17
+  MAVEN_OPTS: -Dmaven.wagon.httpconnectionManager.ttlSeconds=30 -Dmaven.wagon.http.retryHandler.requestSentEnabled=true
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.number || github.run_id }}
@@ -58,6 +61,6 @@ jobs:
           test_modules+="org.apache.paimon:paimon-spark-${suffix},"
           done
           test_modules="${test_modules%,}"
-          mvn -T 2C -B test -pl "${test_modules}" -Duser.timezone=$jvm_timezone -Pspark4,flink1
+          mvn -T 2C -B verify -pl "${test_modules}" -Duser.timezone=$jvm_timezone -Pspark4,flink1
         env:
           MAVEN_OPTS: -Xmx4096m

@@ -29,6 +29,7 @@ import org.assertj.core.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 /** Test for {@link FormatReaderMapping.Builder}. */
@@ -132,6 +133,9 @@ public class FormatReaderMappingTest {
                         trimmedKeyPair.getLeft(),
                         null,
                         null,
+                        null,
+                        null,
+                        Collections.emptyMap(),
                         null,
                         null);
 

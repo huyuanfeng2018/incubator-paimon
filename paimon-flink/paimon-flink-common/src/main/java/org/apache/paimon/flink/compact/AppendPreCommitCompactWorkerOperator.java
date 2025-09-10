@@ -18,6 +18,7 @@
 
 package org.apache.paimon.flink.compact;
 
+import org.apache.paimon.CoreOptions;
 import org.apache.paimon.append.AppendCompactTask;
 import org.apache.paimon.flink.sink.Committable;
 import org.apache.paimon.fs.FileIO;
@@ -27,6 +28,7 @@ import org.apache.paimon.io.DataFilePathFactory;
 import org.apache.paimon.io.DataIncrement;
 import org.apache.paimon.operation.AppendFileStoreWrite;
 import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.table.SpecialFields;
 import org.apache.paimon.table.sink.CommitMessage;
 import org.apache.paimon.table.sink.CommitMessageImpl;
 import org.apache.paimon.utils.FileStorePathFactory;
@@ -40,6 +42,8 @@ import org.apache.flink.types.Either;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+
+import static org.apache.paimon.utils.Preconditions.checkArgument;
 
 /**
  * Receive and process the {@link AppendCompactTask}s emitted by {@link
@@ -62,7 +66,14 @@ public class AppendPreCommitCompactWorkerOperator extends AbstractStreamOperator
     @Override
     public void open() throws Exception {
         super.open();
+        CoreOptions coreOptions = new CoreOptions(table.options());
         this.write = (AppendFileStoreWrite) table.store().newWrite(null);
+        if (coreOptions.rowTrackingEnabled()) {
+            checkArgument(
+                    !coreOptions.dataEvolutionEnabled(),
+                    "Data evolution enabled table should not invoke compact yet.");
+            this.write.withWriteType(SpecialFields.rowTypeWithRowLineage(table.rowType()));
+        }
         this.pathFactory = table.store().pathFactory();
         this.fileIO = table.fileIO();
     }

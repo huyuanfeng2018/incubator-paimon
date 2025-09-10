@@ -18,11 +18,11 @@
 
 package org.apache.paimon.spark.extensions
 
-import org.apache.paimon.spark.catalyst.analysis.{PaimonAnalysis, PaimonDeleteTable, PaimonIncompatiblePHRRules, PaimonIncompatibleResolutionRules, PaimonMergeInto, PaimonPostHocResolutionRules, PaimonProcedureResolver, PaimonUpdateTable, PaimonViewResolver, ReplacePaimonFunctions, RewriteUpsertTable}
+import org.apache.paimon.spark.catalyst.analysis.{PaimonAnalysis, PaimonDeleteTable, PaimonFunctionResolver, PaimonIncompatiblePHRRules, PaimonIncompatibleResolutionRules, PaimonMergeInto, PaimonPostHocResolutionRules, PaimonProcedureResolver, PaimonUpdateTable, PaimonViewResolver, ReplacePaimonFunctions, RewriteUpsertTable}
 import org.apache.paimon.spark.catalyst.optimizer.{EvalSubqueriesForDeleteTable, MergePaimonScalarSubqueries}
 import org.apache.paimon.spark.catalyst.plans.logical.PaimonTableValuedFunctions
 import org.apache.paimon.spark.commands.BucketExpression
-import org.apache.paimon.spark.execution.PaimonStrategy
+import org.apache.paimon.spark.execution.{OldCompatibleStrategy, PaimonStrategy}
 import org.apache.paimon.spark.execution.adaptive.DisableUnnecessaryPaimonBucketedScan
 
 import org.apache.spark.sql.SparkSessionExtensions
@@ -39,6 +39,7 @@ class PaimonSparkSessionExtensions extends (SparkSessionExtensions => Unit) {
     extensions.injectResolutionRule(spark => new PaimonAnalysis(spark))
     extensions.injectResolutionRule(spark => PaimonProcedureResolver(spark))
     extensions.injectResolutionRule(spark => PaimonViewResolver(spark))
+    extensions.injectResolutionRule(spark => PaimonFunctionResolver(spark))
     extensions.injectResolutionRule(spark => SparkShimLoader.shim.createCustomResolution(spark))
     extensions.injectResolutionRule(spark => PaimonIncompatibleResolutionRules(spark))
     extensions.injectResolutionRule(spark => RewriteUpsertTable(spark))
@@ -69,6 +70,8 @@ class PaimonSparkSessionExtensions extends (SparkSessionExtensions => Unit) {
 
     // planner extensions
     extensions.injectPlannerStrategy(spark => PaimonStrategy(spark))
+    // old compatible
+    extensions.injectPlannerStrategy(spark => OldCompatibleStrategy(spark))
 
     // query stage preparation
     extensions.injectQueryStagePrepRule(_ => DisableUnnecessaryPaimonBucketedScan)

@@ -107,11 +107,12 @@ public class TestChangelogDataReadWrite {
                         CoreOptions.FILE_FORMAT.defaultValue().toString(),
                         CoreOptions.DATA_FILE_PREFIX.defaultValue(),
                         CoreOptions.CHANGELOG_FILE_PREFIX.defaultValue(),
-                        CoreOptions.PARTITION_GENERATE_LEGCY_NAME.defaultValue(),
+                        CoreOptions.PARTITION_GENERATE_LEGACY_NAME.defaultValue(),
                         CoreOptions.FILE_SUFFIX_INCLUDE_COMPRESSION.defaultValue(),
                         CoreOptions.FILE_COMPRESSION.defaultValue(),
                         null,
-                        null);
+                        null,
+                        false);
         this.snapshotManager = newSnapshotManager(LocalFileIO.create(), new Path(root));
         this.commitUser = UUID.randomUUID().toString();
     }
@@ -146,7 +147,8 @@ public class TestChangelogDataReadWrite {
                         VALUE_TYPE,
                         FileFormatDiscover.of(options),
                         pathFactory,
-                        options.fileIndexReadEnabled());
+                        options.fileIndexReadEnabled(),
+                        false);
         return new KeyValueTableRead(() -> read, () -> rawFileRead, null);
     }
 
@@ -171,30 +173,30 @@ public class TestChangelogDataReadWrite {
                 new CoreOptions(Collections.singletonMap(CoreOptions.FILE_FORMAT.key(), "avro"));
 
         SchemaManager schemaManager = new SchemaManager(LocalFileIO.create(), tablePath);
-        RecordWriter<KeyValue> writer =
+        KeyValueFileStoreWrite write =
                 new KeyValueFileStoreWrite(
-                                LocalFileIO.create(),
-                                schemaManager,
-                                schemaManager.schema(0),
-                                commitUser,
-                                PARTITION_TYPE,
-                                KEY_TYPE,
-                                VALUE_TYPE,
-                                () -> COMPARATOR,
-                                () -> null,
-                                () -> EQUALISER,
-                                DeduplicateMergeFunction.factory(),
-                                pathFactory,
-                                (coreOptions, format) -> pathFactory,
-                                snapshotManager,
-                                null, // not used, we only create an empty writer
-                                null,
-                                null,
-                                options,
-                                EXTRACTOR,
-                                tablePath.getName())
-                        .createWriterContainer(partition, bucket, true)
-                        .writer;
+                        LocalFileIO.create(),
+                        schemaManager,
+                        schemaManager.schema(0),
+                        commitUser,
+                        PARTITION_TYPE,
+                        KEY_TYPE,
+                        VALUE_TYPE,
+                        () -> COMPARATOR,
+                        () -> null,
+                        () -> EQUALISER,
+                        DeduplicateMergeFunction.factory(),
+                        pathFactory,
+                        (coreOptions, format) -> pathFactory,
+                        snapshotManager,
+                        null, // not used, we only create an empty writer
+                        null,
+                        null,
+                        options,
+                        EXTRACTOR,
+                        tablePath.getName());
+        write.withIgnorePreviousFiles(true);
+        RecordWriter<KeyValue> writer = write.createWriterContainer(partition, bucket).writer;
         ((MemoryOwner) writer)
                 .setMemoryPool(
                         new HeapMemorySegmentPool(options.writeBufferSize(), options.pageSize()));

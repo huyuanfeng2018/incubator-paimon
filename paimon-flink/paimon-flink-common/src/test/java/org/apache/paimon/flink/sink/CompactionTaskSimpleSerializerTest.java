@@ -64,7 +64,7 @@ public class CompactionTaskSimpleSerializerTest {
     }
 
     private DataFileMeta newFile() {
-        return new DataFileMeta(
+        return DataFileMeta.create(
                 UUID.randomUUID().toString(),
                 0,
                 1,
@@ -79,6 +79,8 @@ public class CompactionTaskSimpleSerializerTest {
                 0L,
                 null,
                 FileSource.APPEND,
+                null,
+                null,
                 null);
     }
 }

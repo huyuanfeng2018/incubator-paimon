@@ -74,7 +74,7 @@ public class FileStoreSourceSplitSerializerTest {
     // ------------------------------------------------------------------------
 
     public static DataFileMeta newFile(int level) {
-        return new DataFileMeta(
+        return DataFileMeta.create(
                 "",
                 0,
                 1,
@@ -89,6 +89,8 @@ public class FileStoreSourceSplitSerializerTest {
                 0L,
                 null,
                 FileSource.APPEND,
+                null,
+                null,
                 null);
     }
 

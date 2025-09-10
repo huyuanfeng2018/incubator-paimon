@@ -69,7 +69,7 @@ public class LevelsTest {
     }
 
     public static DataFileMeta newFile(int level) {
-        return new DataFileMeta(
+        return DataFileMeta.create(
                 UUID.randomUUID().toString(),
                 0,
                 1,
@@ -84,6 +84,8 @@ public class LevelsTest {
                 0L,
                 null,
                 FileSource.APPEND,
+                null,
+                null,
                 null);
     }
 }

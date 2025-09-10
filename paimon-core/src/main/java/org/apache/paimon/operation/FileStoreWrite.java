@@ -20,7 +20,7 @@ package org.apache.paimon.operation;
 
 import org.apache.paimon.FileStore;
 import org.apache.paimon.data.BinaryRow;
-import org.apache.paimon.deletionvectors.DeletionVectorsMaintainer;
+import org.apache.paimon.deletionvectors.BucketedDvMaintainer;
 import org.apache.paimon.disk.IOManager;
 import org.apache.paimon.index.DynamicBucketIndexMaintainer;
 import org.apache.paimon.io.DataFileMeta;
@@ -29,6 +29,7 @@ import org.apache.paimon.memory.MemorySegmentPool;
 import org.apache.paimon.metrics.MetricRegistry;
 import org.apache.paimon.table.sink.CommitMessage;
 import org.apache.paimon.table.sink.SinkRecord;
+import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.CommitIncrement;
 import org.apache.paimon.utils.RecordWriter;
 import org.apache.paimon.utils.Restorable;
@@ -51,6 +52,11 @@ public interface FileStoreWrite<T> extends Restorable<List<FileStoreWrite.State<
     FileStoreWrite<T> withWriteRestore(WriteRestore writeRestore);
 
     FileStoreWrite<T> withIOManager(IOManager ioManager);
+
+    /** Specified the write rowType. */
+    default void withWriteType(RowType writeType) {
+        throw new UnsupportedOperationException();
+    }
 
     /**
      * With memory pool for the current file store write.
@@ -150,7 +156,7 @@ public interface FileStoreWrite<T> extends Restorable<List<FileStoreWrite.State<
         protected final List<DataFileMeta> dataFiles;
         protected final long maxSequenceNumber;
         @Nullable protected final DynamicBucketIndexMaintainer indexMaintainer;
-        @Nullable protected final DeletionVectorsMaintainer deletionVectorsMaintainer;
+        @Nullable protected final BucketedDvMaintainer deletionVectorsMaintainer;
         protected final CommitIncrement commitIncrement;
 
         protected State(
@@ -162,7 +168,7 @@ public interface FileStoreWrite<T> extends Restorable<List<FileStoreWrite.State<
                 Collection<DataFileMeta> dataFiles,
                 long maxSequenceNumber,
                 @Nullable DynamicBucketIndexMaintainer indexMaintainer,
-                @Nullable DeletionVectorsMaintainer deletionVectorsMaintainer,
+                @Nullable BucketedDvMaintainer deletionVectorsMaintainer,
                 CommitIncrement commitIncrement) {
             this.partition = partition;
             this.bucket = bucket;

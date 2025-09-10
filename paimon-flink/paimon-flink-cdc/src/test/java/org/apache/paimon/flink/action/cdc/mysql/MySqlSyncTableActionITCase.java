@@ -1133,6 +1133,70 @@ public class MySqlSyncTableActionITCase extends MySqlActionITCaseBase {
 
     @Test
     @Timeout(60)
+    public void testComputedColumnsCrossReference() throws Exception {
+        Map<String, String> mySqlConfig = getBasicMySqlConfig();
+        mySqlConfig.put("database-name", DATABASE_NAME);
+        mySqlConfig.put("table-name", "test_computed_column2");
+
+        List<String> computedColumnDefs =
+                Arrays.asList(
+                        "_lower_of_upper=lower(_upper)",
+                        "_upper=upper(_value)",
+                        "_trim_lower=trim(_lower_of_upper)",
+                        "_constant=cast(11,INT)");
+
+        MySqlSyncTableAction action =
+                syncTableActionBuilder(mySqlConfig)
+                        .withPrimaryKeys("pk")
+                        .withComputedColumnArgs(computedColumnDefs)
+                        .build();
+        runActionWithDefaultEnv(action);
+
+        try (Statement statement = getStatement()) {
+            statement.execute("USE " + DATABASE_NAME);
+            statement.executeUpdate(
+                    "INSERT INTO test_computed_column2 VALUES (1, '2023-03-23', '2022-01-01 14:30', '2021-09-15 15:00:10', ' vaLUE ')");
+            statement.executeUpdate(
+                    "INSERT INTO test_computed_column2 VALUES (2, '2023-03-23', null, null, null)");
+        }
+
+        FileStoreTable table = getFileStoreTable();
+        RowType rowType =
+                RowType.of(
+                        new DataType[] {
+                            DataTypes.INT().notNull(),
+                            DataTypes.DATE(),
+                            DataTypes.TIMESTAMP(0),
+                            DataTypes.TIMESTAMP(0),
+                            DataTypes.VARCHAR(10),
+                            DataTypes.STRING(),
+                            DataTypes.INT(),
+                            DataTypes.STRING(),
+                            DataTypes.STRING()
+                        },
+                        new String[] {
+                            "pk",
+                            "_date",
+                            "_datetime",
+                            "_timestamp",
+                            "_value",
+                            "_upper",
+                            "_constant",
+                            "_lower_of_upper",
+                            "_trim_lower"
+                        });
+        List<String> expected =
+                Arrays.asList(
+                        // sort according to reference
+
+                        "+I[1, 19439, 2022-01-01T14:30, 2021-09-15T15:00:10,  vaLUE ,  VALUE , 11,  value , value]",
+                        "+I[2, 19439, NULL, NULL, NULL, NULL, 11, NULL, NULL]");
+
+        waitForResult(expected, table, rowType, Arrays.asList("pk"));
+    }
+
+    @Test
+    @Timeout(60)
     public void testSyncShards() throws Exception {
         Map<String, String> mySqlConfig = getBasicMySqlConfig();
 
@@ -1237,7 +1301,6 @@ public class MySqlSyncTableActionITCase extends MySqlActionITCaseBase {
         Map<String, String> options = new HashMap<>();
         options.put("bucket", "1");
         options.put("sink.parallelism", "1");
-        options.put("sequence.field", "_timestamp");
 
         createFileStoreTable(
                 RowType.of(
@@ -1254,8 +1317,6 @@ public class MySqlSyncTableActionITCase extends MySqlActionITCaseBase {
         mySqlConfig.put("database-name", DATABASE_NAME);
         mySqlConfig.put("table-name", "test_exist_options_change");
         Map<String, String> tableConfig = new HashMap<>();
-        // update immutable options
-        tableConfig.put("sequence.field", "_date");
         // update existing options
         tableConfig.put("sink.parallelism", "2");
         // add new options
@@ -1271,7 +1332,6 @@ public class MySqlSyncTableActionITCase extends MySqlActionITCaseBase {
         FileStoreTable table = getFileStoreTable();
 
         assertThat(table.options().get("bucket")).isEqualTo("1");
-        assertThat(table.options().get("sequence.field")).isEqualTo("_timestamp");
         assertThat(table.options().get("sink.parallelism")).isEqualTo("2");
         assertThat(table.options().get("snapshot.expire.limit")).isEqualTo("1000");
     }
@@ -1598,5 +1658,58 @@ public class MySqlSyncTableActionITCase extends MySqlActionITCaseBase {
             List<String> expected = Arrays.asList("+I[1, one]", "+I[2, two]");
             waitForResult(expected, table, rowType, primaryKeys);
         }
+    }
+
+    @Test
+    @Timeout(60)
+    public void testSyncPrimaryKeysFromSourceSchemaTrue() throws Exception {
+        Map<String, String> mySqlConfig = getBasicMySqlConfig();
+        mySqlConfig.put("database-name", "check_sync_primary_keys_from_source_schema");
+        mySqlConfig.put("table-name", "t");
+
+        MySqlSyncTableAction action =
+                syncTableActionBuilder(mySqlConfig).withTableConfig(getBasicTableConfig()).build();
+        runActionWithDefaultEnv(action);
+
+        FileStoreTable table = getFileStoreTable();
+        TableSchema schema = table.schema();
+        assertThat(schema.primaryKeys().isEmpty()).isEqualTo(false);
+        assertThat(schema.primaryKeys()).isEqualTo(Collections.singletonList("k"));
+
+        List<String> expectedInsert = Arrays.asList("+I[1, Apache]", "+I[2, Paimon]");
+        RowType rowType =
+                RowType.of(
+                        new DataType[] {DataTypes.INT().notNull(), DataTypes.VARCHAR(10)},
+                        new String[] {"k", "v1"});
+        waitForResult(expectedInsert, table, rowType, Collections.singletonList("k"));
+    }
+
+    @Test
+    @Timeout(60)
+    public void testSyncPrimaryKeysFromSourceSchemaFalse() throws Exception {
+        Map<String, String> mySqlConfig = getBasicMySqlConfig();
+        mySqlConfig.put("database-name", "check_sync_primary_keys_from_source_schema");
+        mySqlConfig.put("table-name", "t");
+
+        Map<String, String> tableConfig = getBasicTableConfig();
+        tableConfig.put("bucket-key", "v1");
+
+        MySqlSyncTableAction action =
+                syncTableActionBuilder(mySqlConfig)
+                        .withTableConfig(tableConfig)
+                        .syncPKeysFromSourceSchema(false)
+                        .build();
+        runActionWithDefaultEnv(action);
+
+        FileStoreTable table = getFileStoreTable();
+        TableSchema schema = table.schema();
+        assertThat(schema.primaryKeys().isEmpty()).isEqualTo(true);
+
+        List<String> expectedInsert = Arrays.asList("+I[1, Apache]", "+I[2, Paimon]");
+        RowType rowType =
+                RowType.of(
+                        new DataType[] {DataTypes.INT().notNull(), DataTypes.VARCHAR(10)},
+                        new String[] {"k", "v1"});
+        waitForResult(expectedInsert, table, rowType, Collections.emptyList());
     }
 }

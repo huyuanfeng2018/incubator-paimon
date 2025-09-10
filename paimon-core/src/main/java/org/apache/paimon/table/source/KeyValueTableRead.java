@@ -26,12 +26,13 @@ import org.apache.paimon.operation.MergeFileSplitRead;
 import org.apache.paimon.operation.RawFileSplitRead;
 import org.apache.paimon.operation.SplitRead;
 import org.apache.paimon.predicate.Predicate;
+import org.apache.paimon.predicate.TopN;
 import org.apache.paimon.reader.RecordReader;
 import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.table.source.splitread.IncrementalChangelogReadProvider;
 import org.apache.paimon.table.source.splitread.IncrementalDiffReadProvider;
 import org.apache.paimon.table.source.splitread.MergeFileSplitReadProvider;
-import org.apache.paimon.table.source.splitread.RawFileSplitReadProvider;
+import org.apache.paimon.table.source.splitread.PrimaryKeyTableRawFileSplitReadProvider;
 import org.apache.paimon.table.source.splitread.SplitReadProvider;
 import org.apache.paimon.types.RowType;
 
@@ -54,6 +55,8 @@ public final class KeyValueTableRead extends AbstractDataTableRead {
     private boolean forceKeepDelete = false;
     private Predicate predicate = null;
     private IOManager ioManager = null;
+    @Nullable private TopN topN = null;
+    @Nullable private Integer limit = null;
 
     public KeyValueTableRead(
             Supplier<MergeFileSplitRead> mergeReadSupplier,
@@ -62,28 +65,35 @@ public final class KeyValueTableRead extends AbstractDataTableRead {
         super(schema);
         this.readProviders =
                 Arrays.asList(
-                        new RawFileSplitReadProvider(batchRawReadSupplier, this::assignValues),
-                        new MergeFileSplitReadProvider(mergeReadSupplier, this::assignValues),
-                        new IncrementalChangelogReadProvider(mergeReadSupplier, this::assignValues),
-                        new IncrementalDiffReadProvider(mergeReadSupplier, this::assignValues));
+                        new PrimaryKeyTableRawFileSplitReadProvider(
+                                batchRawReadSupplier, this::config),
+                        new MergeFileSplitReadProvider(mergeReadSupplier, this::config),
+                        new IncrementalChangelogReadProvider(mergeReadSupplier, this::config),
+                        new IncrementalDiffReadProvider(mergeReadSupplier, this::config));
     }
 
     private List<SplitRead<InternalRow>> initialized() {
         List<SplitRead<InternalRow>> readers = new ArrayList<>();
         for (SplitReadProvider readProvider : readProviders) {
-            if (readProvider.initialized()) {
-                readers.add(readProvider.getOrCreate());
+            if (readProvider.get().initialized()) {
+                readers.add(readProvider.get().get());
             }
         }
         return readers;
     }
 
-    private void assignValues(SplitRead<InternalRow> read) {
+    private void config(SplitRead<InternalRow> read) {
         if (forceKeepDelete) {
             read = read.forceKeepDelete();
         }
         if (readType != null) {
             read = read.withReadType(readType);
+        }
+        if (topN != null) {
+            read = read.withTopN(topN);
+        }
+        if (limit != null) {
+            read = read.withLimit(limit);
         }
         read.withFilter(predicate).withIOManager(ioManager);
     }
@@ -109,6 +119,20 @@ public final class KeyValueTableRead extends AbstractDataTableRead {
     }
 
     @Override
+    public InnerTableRead withTopN(TopN topN) {
+        initialized().forEach(r -> r.withTopN(topN));
+        this.topN = topN;
+        return this;
+    }
+
+    @Override
+    public InnerTableRead withLimit(int limit) {
+        initialized().forEach(r -> r.withLimit(limit));
+        this.limit = limit;
+        return this;
+    }
+
+    @Override
     public TableRead withIOManager(IOManager ioManager) {
         initialized().forEach(r -> r.withIOManager(ioManager));
         this.ioManager = ioManager;
@@ -120,7 +144,7 @@ public final class KeyValueTableRead extends AbstractDataTableRead {
         DataSplit dataSplit = (DataSplit) split;
         for (SplitReadProvider readProvider : readProviders) {
             if (readProvider.match(dataSplit, forceKeepDelete)) {
-                return readProvider.getOrCreate().createReader(dataSplit);
+                return readProvider.get().get().createReader(dataSplit);
             }
         }
 

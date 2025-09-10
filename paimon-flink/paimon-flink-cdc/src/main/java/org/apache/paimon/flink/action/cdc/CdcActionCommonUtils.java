@@ -33,9 +33,9 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import static org.apache.paimon.flink.action.MultiTablesSinkMode.COMBINED;
@@ -70,6 +70,8 @@ public class CdcActionCommonUtils {
     public static final String METADATA_COLUMN = "metadata_column";
     public static final String MULTIPLE_TABLE_PARTITION_KEYS = "multiple_table_partition_keys";
     public static final String EAGER_INIT = "eager_init";
+    public static final String SYNC_PKEYS_FROM_SOURCE_SCHEMA =
+            "sync_primary_keys_from_source_schema";
 
     public static void assertSchemaCompatible(
             TableSchema paimonSchema, List<DataField> sourceTableFields) {
@@ -122,7 +124,8 @@ public class CdcActionCommonUtils {
             CdcMetadataConverter[] metadataConverters,
             boolean caseSensitive,
             boolean strictlyCheckSpecified,
-            boolean requirePrimaryKeys) {
+            boolean requirePrimaryKeys,
+            boolean syncPKeysFromSourceSchema) {
         Schema.Builder builder = Schema.newBuilder();
 
         // options
@@ -165,7 +168,8 @@ public class CdcActionCommonUtils {
                 sourceSchemaPrimaryKeys,
                 allFieldNames,
                 strictlyCheckSpecified,
-                requirePrimaryKeys);
+                requirePrimaryKeys,
+                syncPKeysFromSourceSchema);
 
         // partition keys
         specifiedPartitionKeys = listCaseConvert(specifiedPartitionKeys, caseSensitive);
@@ -185,7 +189,8 @@ public class CdcActionCommonUtils {
             List<String> sourceSchemaPrimaryKeys,
             List<String> allFieldNames,
             boolean strictlyCheckSpecified,
-            boolean requirePrimaryKeys) {
+            boolean requirePrimaryKeys,
+            boolean syncPKeysFromSourceSchema) {
         if (!specifiedPrimaryKeys.isEmpty()) {
             if (allFieldNames.containsAll(specifiedPrimaryKeys)) {
                 builder.primaryKey(specifiedPrimaryKeys);
@@ -205,12 +210,12 @@ public class CdcActionCommonUtils {
             }
         }
 
-        if (!sourceSchemaPrimaryKeys.isEmpty()) {
+        if (syncPKeysFromSourceSchema && !sourceSchemaPrimaryKeys.isEmpty()) {
             builder.primaryKey(sourceSchemaPrimaryKeys);
             return;
         }
 
-        if (requirePrimaryKeys) {
+        if (requirePrimaryKeys && syncPKeysFromSourceSchema) {
             throw new IllegalArgumentException(
                     "Failed to set specified primary keys for sink table "
                             + tableName
@@ -244,10 +249,7 @@ public class CdcActionCommonUtils {
     }
 
     public static void checkDuplicateFields(String tableName, List<String> fieldNames) {
-        List<String> duplicates =
-                fieldNames.stream()
-                        .filter(name -> Collections.frequency(fieldNames, name) > 1)
-                        .collect(Collectors.toList());
+        Set<String> duplicates = Schema.duplicateFields(fieldNames);
         checkState(
                 duplicates.isEmpty(),
                 "Table %s contains duplicate columns: %s.\n"

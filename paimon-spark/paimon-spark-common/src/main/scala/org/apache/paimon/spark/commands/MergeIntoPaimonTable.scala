@@ -20,11 +20,10 @@ package org.apache.paimon.spark.commands
 
 import org.apache.paimon.spark.SparkTable
 import org.apache.paimon.spark.catalyst.analysis.PaimonRelation
-import org.apache.paimon.spark.leafnode.PaimonLeafRunnableCommand
 import org.apache.paimon.spark.schema.{PaimonMetadataColumn, SparkSystemColumns}
-import org.apache.paimon.spark.schema.PaimonMetadataColumn.{FILE_PATH, FILE_PATH_COLUMN, ROW_INDEX, ROW_INDEX_COLUMN}
+import org.apache.paimon.spark.schema.PaimonMetadataColumn._
 import org.apache.paimon.spark.util.{EncoderUtils, SparkRowUtils}
-import org.apache.paimon.table.FileStoreTable
+import org.apache.paimon.table.{FileStoreTable, SpecialFields}
 import org.apache.paimon.table.sink.CommitMessage
 import org.apache.paimon.types.RowKind
 
@@ -51,16 +50,13 @@ case class MergeIntoPaimonTable(
     matchedActions: Seq[MergeAction],
     notMatchedActions: Seq[MergeAction],
     notMatchedBySourceActions: Seq[MergeAction])
-  extends PaimonLeafRunnableCommand
-  with PaimonCommand {
+  extends PaimonRowLevelCommand {
 
   import MergeIntoPaimonTable._
 
   override val table: FileStoreTable = v2Table.getTable.asInstanceOf[FileStoreTable]
 
   lazy val relation: DataSourceV2Relation = PaimonRelation.getPaimonRelation(targetTable)
-
-  lazy val tableSchema: StructType = v2Table.schema
 
   private lazy val (targetOnlyCondition, filteredTargetPlan): (Option[Expression], LogicalPlan) = {
     val filtersOnlyTarget = getExpressionOnlyRelated(mergeCondition, targetTable)
@@ -79,12 +75,12 @@ case class MergeIntoPaimonTable(
     } else {
       performMergeForNonPkTable(sparkSession)
     }
-    dvSafeWriter.commit(commitMessages)
+    writer.commit(commitMessages)
     Seq.empty[Row]
   }
 
   private def performMergeForPkTable(sparkSession: SparkSession): Seq[CommitMessage] = {
-    dvSafeWriter.write(
+    writer.write(
       constructChangedRows(
         sparkSession,
         createDataset(sparkSession, filteredTargetPlan),
@@ -102,38 +98,29 @@ case class MergeIntoPaimonTable(
 
     if (deletionVectorsEnabled) {
       // Step2: generate dataset that should contains ROW_KIND, FILE_PATH, ROW_INDEX columns
-      val metadataCols = Seq(FILE_PATH, ROW_INDEX)
-      val filteredRelation = createDataset(
+      val filteredDf = createDataset(
         sparkSession,
-        createNewScanPlan(
-          candidateDataSplits,
-          targetOnlyCondition.getOrElse(TrueLiteral),
-          relation,
-          metadataCols))
+        createNewScanPlan(candidateDataSplits, relation, targetOnlyCondition))
       val ds = constructChangedRows(
         sparkSession,
-        filteredRelation,
+        selectWithDvMeta(filteredDf),
         remainDeletedRow = true,
-        metadataCols = metadataCols)
+        extraMetadataCols = dvMetaCols)
 
       ds.cache()
       try {
-        val rowKindAttribute = ds.queryExecution.analyzed.output
-          .find(attr => sparkSession.sessionState.conf.resolver(attr.name, ROW_KIND_COL))
-          .getOrElse(throw new RuntimeException("Can not find _row_kind_ column."))
-
         // Step3: filter rows that should be marked as DELETED in Deletion Vector mode.
         val dvDS = ds.where(
           s"$ROW_KIND_COL = ${RowKind.DELETE.toByteValue} or $ROW_KIND_COL = ${RowKind.UPDATE_AFTER.toByteValue}")
         val deletionVectors = collectDeletionVectors(dataFilePathToMeta, dvDS, sparkSession)
-        val indexCommitMsg = dvSafeWriter.persistDeletionVectors(deletionVectors)
+        val indexCommitMsg = writer.persistDeletionVectors(deletionVectors)
 
         // Step4: filter rows that should be written as the inserted/updated data.
         val toWriteDS = ds
           .where(
             s"$ROW_KIND_COL = ${RowKind.INSERT.toByteValue} or $ROW_KIND_COL = ${RowKind.UPDATE_AFTER.toByteValue}")
           .drop(FILE_PATH_COLUMN, ROW_INDEX_COLUMN)
-        val addCommitMessage = dvSafeWriter.write(toWriteDS)
+        val addCommitMessage = writer.write(toWriteDS)
 
         // Step5: commit index and data commit messages
         addCommitMessage ++ indexCommitMsg
@@ -141,8 +128,10 @@ case class MergeIntoPaimonTable(
         ds.unpersist()
       }
     } else {
-      val touchedFilePathsSet = mutable.Set.empty[String]
-      val intersectionFilePaths = mutable.Set.empty[String]
+      // Files need to be rewritten
+      val filePathsToRewritten = mutable.Set.empty[String]
+      // Files need to be read, but not rewritten
+      val filePathsToRead = mutable.Set.empty[String]
 
       def hasUpdate(actions: Seq[MergeAction]): Boolean = {
         actions.exists {
@@ -159,39 +148,53 @@ case class MergeIntoPaimonTable(
       }
 
       if (hasUpdate(matchedActions)) {
-        touchedFilePathsSet ++= findTouchedFiles0("inner")
+        filePathsToRewritten ++= findTouchedFiles0("inner")
       } else if (notMatchedActions.nonEmpty) {
-        intersectionFilePaths ++= findTouchedFiles0("inner")
+        filePathsToRead ++= findTouchedFiles0("inner")
       }
 
       if (hasUpdate(notMatchedBySourceActions)) {
-        touchedFilePathsSet ++= findTouchedFiles0("left_anti")
+        val noMatchedBySourceFilePaths = findTouchedFiles0("left_anti")
+        filePathsToRewritten ++= noMatchedBySourceFilePaths
+        filePathsToRead --= noMatchedBySourceFilePaths
       }
 
-      val touchedFilePaths: Array[String] = touchedFilePathsSet.toArray
-      val unTouchedFilePaths = if (notMatchedActions.nonEmpty) {
-        intersectionFilePaths.diff(touchedFilePathsSet).toArray
-      } else {
-        Array[String]()
-      }
+      val (filesToRewritten, filesToRewrittenScan) =
+        extractFilesAndCreateNewScan(filePathsToRewritten.toArray, dataFilePathToMeta, relation)
+      val (_, filesToReadScan) =
+        extractFilesAndCreateNewScan(filePathsToRead.toArray, dataFilePathToMeta, relation)
 
-      val (touchedFiles, touchedFileRelation) =
-        createNewRelation(touchedFilePaths, dataFilePathToMeta, relation)
-      val (_, unTouchedFileRelation) =
-        createNewRelation(unTouchedFilePaths, dataFilePathToMeta, relation)
+      // If no files need to be rewritten, no need to write row lineage
+      val writeRowLineage = coreOptions.rowTrackingEnabled() && filesToRewritten.nonEmpty
 
       // Add FILE_TOUCHED_COL to mark the row as coming from the touched file, if the row has not been
       // modified and was from touched file, it should be kept too.
-      val touchedDsWithFileTouchedCol = createDataset(sparkSession, touchedFileRelation)
-        .withColumn(FILE_TOUCHED_COL, lit(true))
-      val targetDSWithFileTouchedCol = touchedDsWithFileTouchedCol.union(
-        createDataset(sparkSession, unTouchedFileRelation)
-          .withColumn(FILE_TOUCHED_COL, lit(false)))
+      var filesToRewrittenDS =
+        createDataset(sparkSession, filesToRewrittenScan).withColumn(FILE_TOUCHED_COL, lit(true))
+      if (writeRowLineage) {
+        filesToRewrittenDS = selectWithRowLineage(filesToRewrittenDS)
+      }
 
-      val toWriteDS =
-        constructChangedRows(sparkSession, targetDSWithFileTouchedCol).drop(ROW_KIND_COL)
-      val addCommitMessage = dvSafeWriter.write(toWriteDS)
-      val deletedCommitMessage = buildDeletedCommitMessage(touchedFiles)
+      var filesToReadDS =
+        createDataset(sparkSession, filesToReadScan).withColumn(FILE_TOUCHED_COL, lit(false))
+      if (writeRowLineage) {
+        // For filesToReadScan we don't need to read row lineage meta cols, just add placeholders
+        ROW_LINEAGE_META_COLUMNS.foreach(
+          c => filesToReadDS = filesToReadDS.withColumn(c, lit(null)))
+      }
+
+      val toWriteDS = constructChangedRows(
+        sparkSession,
+        filesToRewrittenDS.union(filesToReadDS),
+        writeRowLineage = writeRowLineage).drop(ROW_KIND_COL)
+
+      val finalWriter = if (writeRowLineage) {
+        writer.withRowLineage()
+      } else {
+        writer
+      }
+      val addCommitMessage = finalWriter.write(toWriteDS)
+      val deletedCommitMessage = buildDeletedCommitMessage(filesToRewritten)
 
       addCommitMessage ++ deletedCommitMessage
     }
@@ -203,7 +206,8 @@ case class MergeIntoPaimonTable(
       targetDataset: Dataset[Row],
       remainDeletedRow: Boolean = false,
       deletionVectorEnabled: Boolean = false,
-      metadataCols: Seq[PaimonMetadataColumn] = Seq.empty): Dataset[Row] = {
+      extraMetadataCols: Seq[PaimonMetadataColumn] = Seq.empty,
+      writeRowLineage: Boolean = false): Dataset[Row] = {
     val targetDS = targetDataset
       .withColumn(TARGET_ROW_COL, lit(true))
 
@@ -217,7 +221,6 @@ case class MergeIntoPaimonTable(
       resolveExpressions(sparkSession)(exprs, joinedPlan)
     }
 
-    val targetOutput = filteredTargetPlan.output
     val targetRowNotMatched = resolveOnJoinedPlan(
       Seq(toExpression(sparkSession, col(SOURCE_ROW_COL).isNull))).head
     val sourceRowNotMatched = resolveOnJoinedPlan(
@@ -225,17 +228,35 @@ case class MergeIntoPaimonTable(
     val matchedExprs = matchedActions.map(_.condition.getOrElse(TrueLiteral))
     val notMatchedExprs = notMatchedActions.map(_.condition.getOrElse(TrueLiteral))
     val notMatchedBySourceExprs = notMatchedBySourceActions.map(_.condition.getOrElse(TrueLiteral))
+
+    val resolver = sparkSession.sessionState.conf.resolver
+    def attribute(name: String) = joinedPlan.output.find(attr => resolver(name, attr.name))
+    val extraMetadataAttributes =
+      extraMetadataCols.flatMap(metadataCol => attribute(metadataCol.name))
+    val (rowIdAttr, sequenceNumberAttr) = if (writeRowLineage) {
+      (
+        attribute(SpecialFields.ROW_ID.name()).get,
+        attribute(SpecialFields.SEQUENCE_NUMBER.name()).get)
+    } else {
+      (null, null)
+    }
+
+    val targetOutput = if (writeRowLineage) {
+      filteredTargetPlan.output ++ Seq(rowIdAttr, sequenceNumberAttr)
+    } else {
+      filteredTargetPlan.output
+    }
     val noopOutput = targetOutput :+ Alias(Literal(NOOP_ROW_KIND_VALUE), ROW_KIND_COL)()
     val keepOutput = targetOutput :+ Alias(Literal(RowKind.INSERT.toByteValue), ROW_KIND_COL)()
 
-    val resolver = sparkSession.sessionState.conf.resolver
-    val metadataAttributes = metadataCols.flatMap {
-      metadataCol => joinedPlan.output.find(attr => resolver(metadataCol.name, attr.name))
-    }
     def processMergeActions(actions: Seq[MergeAction]): Seq[Seq[Expression]] = {
       val columnExprs = actions.map {
         case UpdateAction(_, assignments) =>
-          assignments.map(_.value) :+ Literal(RowKind.UPDATE_AFTER.toByteValue)
+          var exprs = assignments.map(_.value)
+          if (writeRowLineage) {
+            exprs ++= Seq(rowIdAttr, Literal(null))
+          }
+          exprs :+ Literal(RowKind.UPDATE_AFTER.toByteValue)
         case DeleteAction(_) =>
           if (remainDeletedRow || deletionVectorEnabled) {
             targetOutput :+ Literal(RowKind.DELETE.toByteValue)
@@ -245,17 +266,26 @@ case class MergeIntoPaimonTable(
             noopOutput
           }
         case InsertAction(_, assignments) =>
-          assignments.map(_.value) :+ Literal(RowKind.INSERT.toByteValue)
+          var exprs = assignments.map(_.value)
+          if (writeRowLineage) {
+            exprs ++= Seq(rowIdAttr, sequenceNumberAttr)
+          }
+          exprs :+ Literal(RowKind.INSERT.toByteValue)
       }
-      columnExprs.map(exprs => exprs ++ metadataAttributes)
+
+      columnExprs.map(exprs => exprs ++ extraMetadataAttributes)
     }
 
     val matchedOutputs = processMergeActions(matchedActions)
     val notMatchedBySourceOutputs = processMergeActions(notMatchedBySourceActions)
     val notMatchedOutputs = processMergeActions(notMatchedActions)
-    val outputFields = mutable.ArrayBuffer(tableSchema.fields: _*)
+    val outputFields = mutable.ArrayBuffer(targetTable.schema.fields: _*)
+    if (writeRowLineage) {
+      outputFields += PaimonMetadataColumn.ROW_ID.toStructField
+      outputFields += PaimonMetadataColumn.SEQUENCE_NUMBER.toStructField
+    }
     outputFields += StructField(ROW_KIND_COL, ByteType)
-    outputFields ++= metadataCols.map(_.toStructField)
+    outputFields ++= extraMetadataCols.map(_.toStructField)
     val outputSchema = StructType(outputFields.toSeq)
 
     val joinedRowEncoder = EncoderUtils.encode(joinedPlan.schema)
@@ -392,4 +422,5 @@ object MergeIntoPaimonTable {
         .map(notDeletedInternalRow => fromRow(outputProj(notDeletedInternalRow)))
     }
   }
+
 }

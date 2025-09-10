@@ -23,6 +23,8 @@ import org.apache.paimon.format.FileFormatDiscover;
 import org.apache.paimon.format.FormatReaderFactory;
 import org.apache.paimon.partition.PartitionUtils;
 import org.apache.paimon.predicate.Predicate;
+import org.apache.paimon.predicate.SortValue;
+import org.apache.paimon.predicate.TopN;
 import org.apache.paimon.schema.IndexCastMapping;
 import org.apache.paimon.schema.SchemaEvolutionUtil;
 import org.apache.paimon.schema.TableSchema;
@@ -40,6 +42,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.function.Function;
 
 import static org.apache.paimon.predicate.PredicateBuilder.excludePredicateWithFields;
@@ -59,6 +62,9 @@ public class FormatReaderMapping {
     private final FormatReaderFactory readerFactory;
     private final TableSchema dataSchema;
     private final List<Predicate> dataFilters;
+    private final Map<String, Integer> systemFields;
+    @Nullable private final TopN topN;
+    @Nullable private final Integer limit;
 
     public FormatReaderMapping(
             @Nullable int[] indexMapping,
@@ -67,13 +73,19 @@ public class FormatReaderMapping {
             @Nullable Pair<int[], RowType> partitionPair,
             FormatReaderFactory readerFactory,
             TableSchema dataSchema,
-            List<Predicate> dataFilters) {
+            List<Predicate> dataFilters,
+            Map<String, Integer> systemFields,
+            @Nullable TopN topN,
+            @Nullable Integer limit) {
         this.indexMapping = combine(indexMapping, trimmedKeyMapping);
         this.castMapping = castMapping;
         this.readerFactory = readerFactory;
         this.partitionPair = partitionPair;
         this.dataSchema = dataSchema;
         this.dataFilters = dataFilters;
+        this.systemFields = systemFields;
+        this.topN = topN;
+        this.limit = limit;
     }
 
     private int[] combine(@Nullable int[] indexMapping, @Nullable int[] trimmedKeyMapping) {
@@ -111,6 +123,10 @@ public class FormatReaderMapping {
         return partitionPair;
     }
 
+    public Map<String, Integer> getSystemFields() {
+        return systemFields;
+    }
+
     public FormatReaderFactory getReaderFactory() {
         return readerFactory;
     }
@@ -123,23 +139,39 @@ public class FormatReaderMapping {
         return dataFilters;
     }
 
+    @Nullable
+    public TopN getTopN() {
+        return topN;
+    }
+
+    @Nullable
+    public Integer getLimit() {
+        return limit;
+    }
+
     /** Builder for {@link FormatReaderMapping}. */
     public static class Builder {
 
         private final FileFormatDiscover formatDiscover;
-        private final List<DataField> readTableFields;
+        private final List<DataField> readFields;
         private final Function<TableSchema, List<DataField>> fieldsExtractor;
         @Nullable private final List<Predicate> filters;
+        @Nullable private final TopN topN;
+        @Nullable private final Integer limit;
 
         public Builder(
                 FileFormatDiscover formatDiscover,
-                List<DataField> readTableFields,
+                List<DataField> readFields,
                 Function<TableSchema, List<DataField>> fieldsExtractor,
-                @Nullable List<Predicate> filters) {
+                @Nullable List<Predicate> filters,
+                @Nullable TopN topN,
+                @Nullable Integer limit) {
             this.formatDiscover = formatDiscover;
-            this.readTableFields = readTableFields;
+            this.readFields = readFields;
             this.fieldsExtractor = fieldsExtractor;
             this.filters = filters;
+            this.topN = topN;
+            this.limit = limit;
         }
 
         /**
@@ -161,31 +193,35 @@ public class FormatReaderMapping {
          * the real read fields and tell us how to map it back.
          */
         public FormatReaderMapping build(
-                String formatIdentifier, TableSchema tableSchema, TableSchema dataSchema) {
+                String formatIdentifier,
+                TableSchema tableSchema,
+                TableSchema dataSchema,
+                List<DataField> expectedFields,
+                boolean enabledFilterPushDown) {
 
             // extract the whole data fields in logic.
-            List<DataField> allDataFields = fieldsExtractor.apply(dataSchema);
-            List<DataField> readDataFields = readDataFields(allDataFields);
-            // build index cast mapping
+            List<DataField> allDataFieldsInFile =
+                    new ArrayList<>(fieldsExtractor.apply(dataSchema));
+            Map<String, Integer> systemFields = findSystemFields(expectedFields);
+
+            List<DataField> readDataFields = readDataFields(allDataFieldsInFile, expectedFields);
             IndexCastMapping indexCastMapping =
-                    SchemaEvolutionUtil.createIndexCastMapping(readTableFields, readDataFields);
+                    SchemaEvolutionUtil.createIndexCastMapping(expectedFields, readDataFields);
 
             // map from key fields reading to value fields reading
-            Pair<int[], RowType> trimmedKeyPair = trimKeyFields(readDataFields, allDataFields);
-
+            Pair<int[], RowType> trimmedKeyPair =
+                    trimKeyFields(readDataFields, allDataFieldsInFile);
             // build partition mapping and filter partition fields
-            Pair<Pair<int[], RowType>, List<DataField>>
-                    partitionMappingAndFieldsWithoutPartitionPair =
-                            PartitionUtils.constructPartitionMapping(
-                                    dataSchema, trimmedKeyPair.getRight().getFields());
-            Pair<int[], RowType> partitionMapping =
-                    partitionMappingAndFieldsWithoutPartitionPair.getLeft();
+            Pair<Pair<int[], RowType>, List<DataField>> trimmedResult =
+                    PartitionUtils.trimPartitionFields(
+                            dataSchema, trimmedKeyPair.getRight().getFields());
+            Pair<int[], RowType> partitionMapping = trimmedResult.getLeft();
 
-            RowType readRowType =
-                    new RowType(partitionMappingAndFieldsWithoutPartitionPair.getRight());
+            RowType actualReadRowType = new RowType(trimmedResult.getRight());
 
             // build read filters
-            List<Predicate> readFilters = readFilters(filters, tableSchema, dataSchema);
+            List<Predicate> readFilters =
+                    enabledFilterPushDown ? readFilters(filters, tableSchema, dataSchema) : null;
 
             return new FormatReaderMapping(
                     indexCastMapping.getIndexMapping(),
@@ -194,9 +230,49 @@ public class FormatReaderMapping {
                     partitionMapping,
                     formatDiscover
                             .discover(formatIdentifier)
-                            .createReaderFactory(readRowType, readFilters),
+                            .createReaderFactory(
+                                    new RowType(allDataFieldsInFile),
+                                    actualReadRowType,
+                                    readFilters),
                     dataSchema,
-                    readFilters);
+                    readFilters,
+                    systemFields,
+                    evolutionTopN(tableSchema, dataSchema),
+                    limit);
+        }
+
+        @Nullable
+        private TopN evolutionTopN(TableSchema tableSchema, TableSchema dataSchema) {
+            TopN pushTopN = topN;
+            if (pushTopN != null) {
+                Map<String, DataField> tableFields = tableSchema.nameToFieldMap();
+                Map<Integer, DataField> dataFields = dataSchema.idToFieldMap();
+                for (SortValue value : pushTopN.orders()) {
+                    DataField tableField = tableFields.get(value.field().name());
+                    DataField dataField = dataFields.get(tableField.id());
+                    if (!Objects.equals(tableField, dataField)) {
+                        pushTopN = null;
+                        break;
+                    }
+                }
+            }
+            return pushTopN;
+        }
+
+        public FormatReaderMapping build(
+                String formatIdentifier, TableSchema tableSchema, TableSchema dataSchema) {
+            return build(formatIdentifier, tableSchema, dataSchema, readFields, true);
+        }
+
+        private Map<String, Integer> findSystemFields(List<DataField> readTableFields) {
+            Map<String, Integer> systemFields = new HashMap<>();
+            for (int i = 0; i < readTableFields.size(); i++) {
+                DataField field = readTableFields.get(i);
+                if (SpecialFields.isSystemField(field.name())) {
+                    systemFields.put(field.name(), i);
+                }
+            }
+            return systemFields;
         }
 
         static Pair<int[], RowType> trimKeyFields(
@@ -236,10 +312,11 @@ public class FormatReaderMapping {
             return Pair.of(map, new RowType(trimmedFields));
         }
 
-        private List<DataField> readDataFields(List<DataField> allDataFields) {
+        private List<DataField> readDataFields(
+                List<DataField> allDataFields, List<DataField> expectedFields) {
             List<DataField> readDataFields = new ArrayList<>();
             for (DataField dataField : allDataFields) {
-                readTableFields.stream()
+                expectedFields.stream()
                         .filter(f -> f.id() == dataField.id())
                         .findFirst()
                         .ifPresent(
@@ -304,16 +381,16 @@ public class FormatReaderMapping {
         }
 
         private List<Predicate> readFilters(
-                List<Predicate> filters, TableSchema tableSchema, TableSchema dataSchema) {
+                List<Predicate> filters, TableSchema tableSchema, TableSchema fileSchema) {
             List<Predicate> dataFilters =
-                    tableSchema.id() == dataSchema.id()
+                    tableSchema.id() == fileSchema.id()
                             ? filters
                             : SchemaEvolutionUtil.devolveFilters(
-                                    tableSchema.fields(), dataSchema.fields(), filters, false);
+                                    tableSchema.fields(), fileSchema.fields(), filters, false);
 
             // Skip pushing down partition filters to reader.
             return excludePredicateWithFields(
-                    dataFilters, new HashSet<>(dataSchema.partitionKeys()));
+                    dataFilters, new HashSet<>(fileSchema.partitionKeys()));
         }
     }
 }

@@ -29,6 +29,8 @@ import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.ObjectsFile;
 import org.apache.paimon.utils.PathFactory;
 
+import java.util.ArrayList;
+
 /**
  * This file includes several Iceberg {@link IcebergManifestFileMeta}s, representing the additional
  * changes since last snapshot.
@@ -45,7 +47,7 @@ public class IcebergManifestList extends ObjectsFile<IcebergManifestFileMeta> {
                 fileIO,
                 new IcebergManifestFileMetaSerializer(manifestType),
                 manifestType,
-                fileFormat.createReaderFactory(manifestType),
+                fileFormat.createReaderFactory(manifestType, manifestType, new ArrayList<>()),
                 fileFormat.createWriterFactory(manifestType),
                 compression,
                 pathFactory,
@@ -63,7 +65,9 @@ public class IcebergManifestList extends ObjectsFile<IcebergManifestFileMeta> {
         avroOptions.set(
                 "avro.row-name-mapping",
                 "org.apache.paimon.avro.generated.record:manifest_file,"
-                        + "manifest_file_partitions:r508");
+                        + "iceberg:true,"
+                        + "manifest_file_partitions:r508,"
+                        + "array_id_r508:508");
         FileFormat fileFormat = FileFormat.fromIdentifier("avro", avroOptions);
         RowType manifestType =
                 IcebergManifestFileMeta.schema(

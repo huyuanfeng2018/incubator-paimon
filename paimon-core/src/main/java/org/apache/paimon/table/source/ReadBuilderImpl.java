@@ -22,6 +22,7 @@ import org.apache.paimon.CoreOptions;
 import org.apache.paimon.partition.PartitionPredicate;
 import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.predicate.PredicateBuilder;
+import org.apache.paimon.predicate.TopN;
 import org.apache.paimon.table.InnerTable;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.Filter;
@@ -47,6 +48,7 @@ public class ReadBuilderImpl implements ReadBuilder {
     private Predicate filter;
 
     private Integer limit = null;
+    private TopN topN = null;
 
     private Integer shardIndexOfThisSubtask;
     private Integer shardNumberOfParallelSubtasks;
@@ -110,12 +112,6 @@ public class ReadBuilderImpl implements ReadBuilder {
 
     @Override
     public ReadBuilder withReadType(RowType readType) {
-        RowType tableRowType = table.rowType();
-        checkState(
-                readType.isPrunedFrom(tableRowType),
-                "read row type must be a pruned type from table row type, read row type: %s, table row type: %s",
-                readType,
-                tableRowType);
         this.readType = readType;
         return this;
     }
@@ -131,6 +127,12 @@ public class ReadBuilderImpl implements ReadBuilder {
     @Override
     public ReadBuilder withLimit(int limit) {
         this.limit = limit;
+        return this;
+    }
+
+    @Override
+    public ReadBuilder withTopN(TopN topN) {
+        this.topN = topN;
         return this;
     }
 
@@ -164,6 +166,9 @@ public class ReadBuilderImpl implements ReadBuilder {
         InnerTableScan tableScan = configureScan(table.newScan());
         if (limit != null) {
             tableScan.withLimit(limit);
+        }
+        if (topN != null) {
+            tableScan.withTopN(topN);
         }
         return tableScan;
     }
@@ -208,6 +213,12 @@ public class ReadBuilderImpl implements ReadBuilder {
         InnerTableRead read = table.newRead().withFilter(filter);
         if (readType != null) {
             read.withReadType(readType);
+        }
+        if (topN != null) {
+            read.withTopN(topN);
+        }
+        if (limit != null) {
+            read.withLimit(limit);
         }
         return read;
     }

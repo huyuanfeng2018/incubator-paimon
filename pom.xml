@@ -134,6 +134,7 @@ under the License.
         <zstd-jni.version>1.5.5-11</zstd-jni.version>
         <janino.version>3.0.11</janino.version>
         <mockito.version>3.4.6</mockito.version>
+        <mockito-junit-jupiter.version>4.11.0</mockito-junit-jupiter.version>
         <okhttp.version>4.12.0</okhttp.version>
         <apache.hc.core.version>5.3.3</apache.hc.core.version>
         <apache.hc.client.version>5.4.2</apache.hc.client.version>
@@ -425,10 +426,10 @@ under the License.
                 <antlr4.version>4.13.1</antlr4.version>
                 <scala.binary.version>2.13</scala.binary.version>
                 <scala.version>${scala213.version}</scala.version>
-                <paimon-spark-common.spark.version>4.0.0</paimon-spark-common.spark.version>
+                <paimon-spark-common.spark.version>4.0.1</paimon-spark-common.spark.version>
                 <paimon-sparkx-common>paimon-spark4-common</paimon-sparkx-common>
                 <test.spark.main.version>4.0</test.spark.main.version>
-                <test.spark.version>4.0.0</test.spark.version>
+                <test.spark.version>4.0.1</test.spark.version>
             </properties>
             <activation>
                 <property>
@@ -465,13 +466,15 @@ under the License.
             <id>flink2</id>
             <properties>
                 <paimon-flinkx-common>paimon-flink2-common</paimon-flinkx-common>
-                <paimon-flink-common.flink.version>2.0.0</paimon-flink-common.flink.version>
-                <test.flink.main.version>2.0</test.flink.main.version>
-                <test.flink.version>2.0.0</test.flink.version>
+                <paimon-flink-common.flink.version>2.1.0</paimon-flink-common.flink.version>
+                <test.flink.main.version>2.1</test.flink.main.version>
+                <test.flink.version>2.1.0</test.flink.version>
+                <target.java.version>11</target.java.version>
             </properties>
             <modules>
                 <module>paimon-flink/paimon-flink2-common</module>
                 <module>paimon-flink/paimon-flink-2.0</module>
+                <module>paimon-flink/paimon-flink-2.1</module>
             </modules>
             <activation>
                 <property>
@@ -956,6 +959,19 @@ under the License.
                             <importOrder>
                                 <order>org.apache.paimon,org.apache.paimon.shade,,javax,java,scala,\#</order>
                             </importOrder>
+
+                            <!-- Replace illegal imports with shaded versions -->
+                            <replaceRegex>
+                                <name>Replace Guava imports</name>
+                                <searchRegex>import com\.google\.common\.([^;]+);</searchRegex>
+                                <replacement>import org.apache.paimon.shade.guava30.com.google.common.$1;</replacement>
+                            </replaceRegex>
+
+                            <replaceRegex>
+                                <name>Replace Jackson imports</name>
+                                <searchRegex>import com\.fasterxml\.jackson\.([^;]+);</searchRegex>
+                                <replacement>import org.apache.paimon.shade.jackson2.com.fasterxml.jackson.$1;</replacement>
+                            </replaceRegex>
 
                             <licenseHeader>
                                 <!-- replace it with ${project.rootDirectory} after maven 4.0.0, see MNG-7038 -->

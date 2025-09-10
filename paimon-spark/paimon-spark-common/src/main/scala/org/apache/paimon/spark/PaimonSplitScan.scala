@@ -20,9 +20,10 @@ package org.apache.paimon.spark
 
 import org.apache.paimon.CoreOptions
 import org.apache.paimon.predicate.Predicate
-import org.apache.paimon.table.{KnownSplitsTable, Table}
+import org.apache.paimon.table.{InnerTable, KnownSplitsTable}
 import org.apache.paimon.table.source.{DataSplit, Split}
 
+import org.apache.spark.sql.connector.metric.{CustomMetric, CustomTaskMetric}
 import org.apache.spark.sql.connector.read.{Batch, Scan}
 import org.apache.spark.sql.types.StructType
 
@@ -34,7 +35,7 @@ class PaimonSplitScanBuilder(table: KnownSplitsTable) extends PaimonScanBuilder(
 
 /** For internal use only. */
 case class PaimonSplitScan(
-    table: Table,
+    table: InnerTable,
     dataSplits: Array[DataSplit],
     requiredSchema: StructType,
     filters: Seq[Predicate])
@@ -50,6 +51,22 @@ case class PaimonSplitScan(
       metadataColumns)
   }
 
+  override def supportedCustomMetrics: Array[CustomMetric] = {
+    Array(
+      PaimonNumSplitMetric(),
+      PaimonSplitSizeMetric(),
+      PaimonAvgSplitSizeMetric(),
+      PaimonResultedTableFilesMetric()
+    )
+  }
+
+  override def reportDriverMetrics(): Array[CustomTaskMetric] = {
+    val filesCount = dataSplits.map(_.dataFiles().size).sum
+    Array(
+      PaimonResultedTableFilesTaskMetric(filesCount)
+    )
+  }
+
   override def description(): String = {
     val pushedFiltersStr = if (filters.nonEmpty) {
       ", PushedFilters: [" + filters.mkString(",") + "]"
@@ -57,12 +74,5 @@ case class PaimonSplitScan(
       ""
     }
     s"PaimonSplitScan: [${table.name}]" + pushedFiltersStr
-  }
-}
-
-object PaimonSplitScan {
-  def apply(table: Table, dataSplits: Array[DataSplit]): PaimonSplitScan = {
-    val requiredSchema = SparkTypeUtils.fromPaimonRowType(table.rowType)
-    new PaimonSplitScan(table, dataSplits, requiredSchema, Seq.empty)
   }
 }

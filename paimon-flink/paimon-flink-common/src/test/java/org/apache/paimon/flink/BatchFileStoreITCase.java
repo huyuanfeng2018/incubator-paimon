@@ -19,7 +19,11 @@
 package org.apache.paimon.flink;
 
 import org.apache.paimon.CoreOptions;
+import org.apache.paimon.Snapshot;
+import org.apache.paimon.catalog.Catalog;
+import org.apache.paimon.deletionvectors.DeletionVector;
 import org.apache.paimon.flink.util.AbstractTestBase;
+import org.apache.paimon.manifest.IndexManifestEntry;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.Table;
 import org.apache.paimon.table.source.snapshot.TimeTravelUtil;
@@ -40,13 +44,13 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.math.BigDecimal;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
 
+import static java.util.Collections.singletonList;
 import static org.apache.paimon.testutils.assertj.PaimonAssertions.anyCauseMatches;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -56,7 +60,100 @@ public class BatchFileStoreITCase extends CatalogITCaseBase {
 
     @Override
     protected List<String> ddl() {
-        return Collections.singletonList("CREATE TABLE IF NOT EXISTS T (a INT, b INT, c INT)");
+        return singletonList("CREATE TABLE IF NOT EXISTS T (a INT, b INT, c INT)");
+    }
+
+    @Test
+    public void testCsvFileFormat() {
+        innerTestTextFileFormat("csv");
+    }
+
+    @Test
+    public void testJsonFileFormat() {
+        innerTestTextFileFormat("json");
+    }
+
+    private void innerTestTextFileFormat(String format) {
+        // TODO zstd dependent on Hadoop 3.x
+        //        sql("CREATE TABLE TEXT_T (a INT, b INT, c INT) WITH ('file.format'='%s')",
+        // format);
+        //        sql("INSERT INTO TEXT_T VALUES (1, 2, 3)");
+        //        assertThat(sql("SELECT * FROM TEXT_T")).containsExactly(Row.of(1, 2, 3));
+        //        List<String> files =
+        //                sql("select file_path from `TEXT_T$files`").stream()
+        //                        .map(r -> r.getField(0).toString())
+        //                        .collect(Collectors.toList());
+        //        assertThat(files).allMatch(file -> file.endsWith(format + ".zst"));
+
+        sql(
+                "CREATE TABLE TEXT_NONE (a INT, b INT, c INT) WITH ('file.format'='%s', 'file.compression'='none')",
+                format);
+        sql("INSERT INTO TEXT_NONE VALUES (1, 2, 3)");
+        assertThat(sql("SELECT a FROM TEXT_NONE")).containsExactly(Row.of(1));
+        List<String> files =
+                sql("select file_path from `TEXT_NONE$files`").stream()
+                        .map(r -> r.getField(0).toString())
+                        .collect(Collectors.toList());
+        assertThat(files).allMatch(file -> file.endsWith(format));
+
+        sql(
+                "CREATE TABLE TEXT_GZIP (a INT, b INT, c INT) WITH ('file.format'='%s', 'file.compression'='gzip')",
+                format);
+        sql("INSERT INTO TEXT_GZIP VALUES (1, 2, 3)");
+        assertThat(sql("SELECT b FROM TEXT_GZIP")).containsExactly(Row.of(2));
+        files =
+                sql("select file_path from `TEXT_GZIP$files`").stream()
+                        .map(r -> r.getField(0).toString())
+                        .collect(Collectors.toList());
+        assertThat(files).allMatch(file -> file.endsWith(format + ".gz"));
+    }
+
+    @Test
+    public void testFullCompactionNoDv() throws Catalog.TableNotExistException {
+        sql(
+                "CREATE TEMPORARY TABLE GEN (a INT) WITH ("
+                        + "'connector'='datagen', "
+                        + "'number-of-rows'='1000', "
+                        + "'fields.a.kind'='sequence', "
+                        + "'fields.a.start'='0', "
+                        + "'fields.a.end'='1000')");
+        sql(
+                "CREATE TABLE T1 (a INT PRIMARY KEY NOT ENFORCED, b STRING, c STRING) WITH ("
+                        + "'bucket' = '1', "
+                        + "'file.format' = 'avro', "
+                        + "'file.compression' = 'null', "
+                        + "'deletion-vectors.enabled' = 'true')");
+        batchSql("INSERT INTO T1 SELECT a, 'unknown', 'unknown' FROM GEN");
+
+        // first insert, producing dv files
+        batchSql("INSERT INTO T1 VALUES (1, '22', '33')");
+        FileStoreTable table = paimonTable("T1");
+        Snapshot snapshot = table.latestSnapshot().get();
+        assertThat(deletionVectors(table, snapshot)).hasSize(1);
+        assertThat(batchSql("SELECT * FROM T1 WHERE a = 1")).containsExactly(Row.of(1, "22", "33"));
+
+        // second insert, producing no dv files
+        batchSql("ALTER TABLE T1 SET ('compaction.total-size-threshold' = '1m')");
+        batchSql("INSERT INTO T1 VALUES (1, '44', '55')");
+        snapshot = table.latestSnapshot().get();
+        assertThat(deletionVectors(table, snapshot)).hasSize(0);
+        assertThat(batchSql("SELECT * FROM T1 WHERE a = 1")).containsExactly(Row.of(1, "44", "55"));
+
+        // third insert, producing no dv files, same index manifest
+        batchSql("INSERT INTO T1 VALUES (1, '66', '77')");
+        assertThat(table.latestSnapshot().get().indexManifest())
+                .isEqualTo(snapshot.indexManifest());
+        assertThat(batchSql("SELECT * FROM T1 WHERE a = 1")).containsExactly(Row.of(1, "66", "77"));
+    }
+
+    private Map<String, DeletionVector> deletionVectors(FileStoreTable table, Snapshot snapshot) {
+        assertThat(snapshot.indexManifest()).isNotNull();
+        List<IndexManifestEntry> indexManifestEntries =
+                table.indexManifestFileReader().read(snapshot.indexManifest());
+        assertThat(indexManifestEntries.size()).isEqualTo(1);
+        return table.store()
+                .newIndexFileHandler()
+                .readAllDeletionVectors(indexManifestEntries.get(0));
     }
 
     @Test
@@ -64,6 +161,19 @@ public class BatchFileStoreITCase extends CatalogITCaseBase {
         batchSql(
                 "CREATE TABLE IF NOT EXISTS PK (a INT PRIMARY KEY NOT ENFORCED, b INT, c INT) WITH ('bucket' = '2')");
         batchSql("ALTER TABLE PK SET ('sink.writer-coordinator.enabled' = 'true')");
+        batchSql("INSERT INTO PK VALUES (1, 11, 111), (2, 22, 222), (3, 33, 333)");
+        batchSql("INSERT INTO PK VALUES (1, 11, 111), (2, 22, 222), (3, 33, 333)");
+        assertThat(batchSql("SELECT * FROM PK"))
+                .containsExactlyInAnyOrder(
+                        Row.of(1, 11, 111), Row.of(2, 22, 222), Row.of(3, 33, 333));
+    }
+
+    @Test
+    public void testWriteRestoreCoordinatorWithPageSize() {
+        batchSql(
+                "CREATE TABLE IF NOT EXISTS PK (a INT PRIMARY KEY NOT ENFORCED, b INT, c INT) WITH ('bucket' = '2')");
+        batchSql("ALTER TABLE PK SET ('sink.writer-coordinator.enabled' = 'true')");
+        batchSql("ALTER TABLE PK SET ('sink.writer-coordinator.page-size' = '10 b')");
         batchSql("INSERT INTO PK VALUES (1, 11, 111), (2, 22, 222), (3, 33, 333)");
         batchSql("INSERT INTO PK VALUES (1, 11, 111), (2, 22, 222), (3, 33, 333)");
         assertThat(batchSql("SELECT * FROM PK"))
@@ -763,6 +873,18 @@ public class BatchFileStoreITCase extends CatalogITCaseBase {
     }
 
     @Test
+    public void testScanWithSpecifiedPartitionsWithFieldMapping() {
+        sql("CREATE TABLE P (id INT, v INT, pt STRING) PARTITIONED BY (pt)");
+        sql("CREATE TABLE Q (id INT)");
+        sql(
+                "INSERT INTO P VALUES (1, 10, 'a'), (2, 20, 'a'), (1, 11, 'b'), (3, 31, 'b'), (1, 12, 'c'), (2, 22, 'c'), (3, 32, 'c')");
+        sql("INSERT INTO Q VALUES (1), (2)");
+        String query =
+                "SELECT Q.id, P.v FROM Q INNER JOIN P /*+ OPTIONS('scan.partitions' = 'pt=b;pt=c') */ ON Q.id = P.id ORDER BY Q.id, P.v";
+        assertThat(sql(query)).containsExactly(Row.of(1, 11), Row.of(1, 12), Row.of(2, 22));
+    }
+
+    @Test
     public void testEmptyTableIncrementalBetweenTimestamp() {
         assertThat(sql("SELECT * FROM T /*+ OPTIONS('incremental-between-timestamp'='0,1') */"))
                 .isEmpty();
@@ -781,7 +903,7 @@ public class BatchFileStoreITCase extends CatalogITCaseBase {
         // snapshot 5,6
         String dataId =
                 TestValuesTableFactory.registerData(
-                        Collections.singletonList(Row.ofKind(RowKind.DELETE, 2, "B")));
+                        singletonList(Row.ofKind(RowKind.DELETE, 2, "B")));
         sEnv.executeSql(
                 "CREATE TEMPORARY TABLE source (id INT, v STRING) "
                         + "WITH ('connector' = 'values', 'bounded' = 'true', 'data-id' = '"

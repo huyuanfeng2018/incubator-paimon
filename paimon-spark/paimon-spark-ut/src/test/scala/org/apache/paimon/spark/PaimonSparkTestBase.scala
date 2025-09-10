@@ -29,7 +29,6 @@ import org.apache.paimon.table.FileStoreTable
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.QueryTest
-import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.connector.catalog.{Identifier => SparkIdentifier}
 import org.apache.spark.sql.execution.datasources.v2.{DataSourceV2Relation, DataSourceV2ScanRelation}
 import org.apache.spark.sql.internal.SQLConf
@@ -175,7 +174,7 @@ class PaimonSparkTestBase
     paimonCatalog.getTable(Identifier.create(dbName, tableName)).asInstanceOf[FileStoreTable]
   }
 
-  protected def createRelationV2(tableName: String): LogicalPlan = {
+  protected def createRelationV2(tableName: String): DataSourceV2Relation = {
     val sparkTable = SparkTable(loadTable(tableName))
     DataSourceV2Relation.create(
       sparkTable,

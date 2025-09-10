@@ -57,8 +57,16 @@ public class RoaringBitmap32 {
         roaringBitmap.add(x);
     }
 
+    public void and(RoaringBitmap32 other) {
+        roaringBitmap.and(other.roaringBitmap);
+    }
+
     public void or(RoaringBitmap32 other) {
         roaringBitmap.or(other.roaringBitmap);
+    }
+
+    public void andNot(RoaringBitmap32 other) {
+        roaringBitmap.andNot(other.roaringBitmap);
     }
 
     public boolean checkedAdd(int x) {
@@ -95,6 +103,14 @@ public class RoaringBitmap32 {
 
     public boolean intersects(long minimum, long supremum) {
         return roaringBitmap.intersects(minimum, supremum);
+    }
+
+    public RoaringBitmap32 limit(int k) {
+        return new RoaringBitmap32(roaringBitmap.limit(k));
+    }
+
+    public void remove(int position) {
+        roaringBitmap.remove(position);
     }
 
     public RoaringBitmap32 clone() {
@@ -157,6 +173,10 @@ public class RoaringBitmap32 {
             roaringBitmap32.add(ele);
         }
         return roaringBitmap32;
+    }
+
+    public static RoaringBitmap32 bitmapOfRange(long min, long max) {
+        return new RoaringBitmap32(RoaringBitmap.bitmapOfRange(min, max));
     }
 
     public static RoaringBitmap32 and(final RoaringBitmap32 x1, final RoaringBitmap32 x2) {

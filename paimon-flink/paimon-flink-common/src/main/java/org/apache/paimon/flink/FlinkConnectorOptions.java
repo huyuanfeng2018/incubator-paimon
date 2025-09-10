@@ -513,15 +513,31 @@ public class FlinkConnectorOptions {
     public static final ConfigOption<MemorySize> SINK_WRITER_COORDINATOR_CACHE_MEMORY =
             key("sink.writer-coordinator.cache-memory")
                     .memoryType()
-                    .defaultValue(MemorySize.ofMebiBytes(1024))
+                    .defaultValue(MemorySize.ofMebiBytes(2048))
                     .withDescription(
                             "Controls the cache memory of writer coordinator to cache manifest files in Job Manager.");
+
+    public static final ConfigOption<MemorySize> SINK_WRITER_COORDINATOR_PAGE_SIZE =
+            key("sink.writer-coordinator.page-size")
+                    .memoryType()
+                    .defaultValue(MemorySize.ofKibiBytes(32))
+                    .withDescription(
+                            "Controls the page size for one RPC request of writer coordinator.");
 
     public static final ConfigOption<Boolean> FILESYSTEM_JOB_LEVEL_SETTINGS_ENABLED =
             key("filesystem.job-level-settings.enabled")
                     .booleanType()
-                    .defaultValue(false)
+                    .defaultValue(true)
                     .withDescription("Enable pass job level filesystem settings to table file IO.");
+
+    public static final ConfigOption<String> SINK_WRITER_REFRESH_DETECTORS =
+            key("sink.writer-refresh-detectors")
+                    .stringType()
+                    .noDefaultValue()
+                    .withDescription(
+                            "The option groups which are expected to be refreshed when streaming writing, "
+                                    + "multiple option group separated by commas. "
+                                    + "Now only 'external-paths' is supported.");
 
     public static List<ConfigOption<?>> getOptions() {
         final Field[] fields = FlinkConnectorOptions.class.getFields();

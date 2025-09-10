@@ -24,10 +24,13 @@ import org.apache.paimon.table.source.DataSplit
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.catalyst.expressions.{AttributeReference, EqualTo, Expression, Literal}
 import org.apache.spark.sql.catalyst.plans.logical.Filter
-import org.apache.spark.sql.catalyst.trees.TreePattern.DYNAMIC_PRUNING_SUBQUERY
-import org.apache.spark.sql.connector.read.{ScanBuilder, SupportsPushDownLimit}
+import org.apache.spark.sql.catalyst.trees.TreePattern.{DYNAMIC_PRUNING_SUBQUERY, LIMIT, SORT}
+import org.apache.spark.sql.connector.read.{ScanBuilder, SupportsPushDownLimit, SupportsPushDownTopN}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
+import org.assertj.core.api.{Assertions => assertj}
 import org.junit.jupiter.api.Assertions
+
+import java.util.UUID
 
 abstract class PaimonPushDownTestBase extends PaimonSparkTestBase {
 
@@ -221,6 +224,7 @@ abstract class PaimonPushDownTestBase extends PaimonSparkTestBase {
 
               sql("INSERT INTO T SELECT id FROM range (1, 50000)")
               sql("DELETE FROM T WHERE id % 13 = 0")
+              Assertions.assertEquals(100, spark.sql("SELECT * FROM T LIMIT 100").count())
 
               val withoutLimit = getScanBuilder().build().asInstanceOf[PaimonScan].getOriginSplits
               assert(withoutLimit.length == 10)
@@ -275,6 +279,228 @@ abstract class PaimonPushDownTestBase extends PaimonSparkTestBase {
       Assertions.assertTrue(qe2.optimizedPlan.containsPattern(DYNAMIC_PRUNING_SUBQUERY))
       Assertions.assertTrue(qe2.sparkPlan.containsPattern(DYNAMIC_PRUNING_SUBQUERY))
       checkAnswer(df2, Row(5, "e", "2025", "x5") :: Nil)
+    }
+  }
+
+  test("Paimon pushDown: TopN for append-only tables") {
+    assume(gteqSpark3_3)
+    spark.sql("""
+                |CREATE TABLE T (pt INT, id INT, price BIGINT) PARTITIONED BY (pt)
+                |TBLPROPERTIES ('file-index.range-bitmap.columns'='id')
+                |""".stripMargin)
+    Assertions.assertTrue(getScanBuilder().isInstanceOf[SupportsPushDownTopN])
+
+    spark.sql("""
+                |INSERT INTO T VALUES
+                |(1, 10, 100L),
+                |(2, 20, 200L),
+                |(3, 30, 300L)
+                |""".stripMargin)
+    spark.sql("""
+                |INSERT INTO T VALUES
+                |(4, 40, 400L),
+                |(5, 50, 500L)
+                |""".stripMargin)
+    spark.sql("""
+                |INSERT INTO T VALUES
+                |(6, NULL, 600L),
+                |(6, NULL, 600L),
+                |(6, 60, 600L),
+                |(7, NULL, 700L),
+                |(7, NULL, 700L),
+                |(7, 70, 700L)
+                |""".stripMargin)
+
+    // disable stats
+    spark.sql("""
+                |ALTER TABLE T SET TBLPROPERTIES ('metadata.stats-mode' = 'none')
+                |""".stripMargin)
+    spark.sql("""
+                |INSERT INTO T VALUES
+                |(8, 80, 800L),
+                |(9, 90, 900L)
+                |""".stripMargin)
+    spark.sql("""
+                |ALTER TABLE T UNSET TBLPROPERTIES ('metadata.stats-mode')
+                |""".stripMargin)
+
+    // test ASC
+    checkAnswer(
+      spark.sql("SELECT id FROM T ORDER BY id ASC NULLS LAST LIMIT 5"),
+      Row(10) :: Row(20) :: Row(30) :: Row(40) :: Row(50) :: Nil)
+    checkAnswer(
+      spark.sql("SELECT id FROM T ORDER BY id ASC NULLS FIRST LIMIT 5"),
+      Row(null) :: Row(null) :: Row(null) :: Row(null) :: Row(10) :: Nil)
+
+    // test DESC
+    checkAnswer(
+      spark.sql("SELECT id FROM T ORDER BY id DESC NULLS LAST LIMIT 5"),
+      Row(90) :: Row(80) :: Row(70) :: Row(60) :: Row(50) :: Nil)
+    checkAnswer(
+      spark.sql("SELECT id FROM T ORDER BY id DESC NULLS FIRST LIMIT 5"),
+      Row(null) :: Row(null) :: Row(null) :: Row(null) :: Row(90) :: Nil)
+
+    // test with partition
+    checkAnswer(
+      spark.sql("SELECT id FROM T WHERE pt=6 ORDER BY id DESC LIMIT 5"),
+      Row(60) :: Row(null) :: Row(null) :: Nil)
+    checkAnswer(
+      spark.sql("SELECT id FROM T WHERE pt=6 ORDER BY id ASC LIMIT 3"),
+      Row(null) :: Row(null) :: Row(60) :: Nil)
+
+    // test plan
+    val df1 = spark.sql("SELECT * FROM T ORDER BY id DESC LIMIT 1")
+    val qe1 = df1.queryExecution
+    Assertions.assertTrue(qe1.optimizedPlan.containsPattern(SORT))
+    Assertions.assertTrue(qe1.optimizedPlan.containsPattern(LIMIT))
+  }
+
+  test("Paimon pushDown: multi TopN for append-only tables") {
+    assume(gteqSpark3_3)
+    spark.sql("""
+                |CREATE TABLE T (pt INT, id INT, price BIGINT) PARTITIONED BY (pt)
+                |TBLPROPERTIES ('file-index.range-bitmap.columns'='id')
+                |""".stripMargin)
+    Assertions.assertTrue(getScanBuilder().isInstanceOf[SupportsPushDownTopN])
+
+    spark.sql("""
+                |INSERT INTO T VALUES
+                |(1, 10, 100L),
+                |(1, 20, 100L),
+                |(1, 20, 200L),
+                |(1, 20, 200L),
+                |(1, 20, 200L),
+                |(1, 20, 200L),
+                |(1, 20, 300L),
+                |(1, 30, 100L)
+                |""".stripMargin)
+
+    // test ASC
+    checkAnswer(
+      spark.sql("SELECT id, price FROM T ORDER BY id ASC, price ASC LIMIT 2"),
+      Row(10, 100L) :: Row(20, 100L) :: Nil)
+    checkAnswer(
+      spark.sql("SELECT id, price FROM T ORDER BY id ASC, price DESC LIMIT 2"),
+      Row(10, 100L) :: Row(20, 300L) :: Nil)
+
+    // test DESC
+    checkAnswer(
+      spark.sql("SELECT id, price FROM T ORDER BY id DESC, price ASC LIMIT 2"),
+      Row(30, 100L) :: Row(20, 100L) :: Nil)
+    checkAnswer(
+      spark.sql("SELECT id, price FROM T ORDER BY id DESC, price DESC LIMIT 2"),
+      Row(30, 100L) :: Row(20, 300L) :: Nil)
+  }
+
+  test("Paimon pushDown: TopN for primary-key tables with deletion vector") {
+    assume(gteqSpark3_3)
+    withTable("dv_test") {
+      spark.sql("""
+                  |CREATE TABLE dv_test (id INT, c1 INT, c2 STRING) TBLPROPERTIES (
+                  |'primary-key'='id',
+                  |'deletion-vectors.enabled' = 'true',
+                  |'file-index.range-bitmap.columns'='c1'
+                  |)
+                  |""".stripMargin)
+
+      spark.sql(
+        "insert into table dv_test values(1, 1, 'a'),(2, 2,'b'),(3, 3, 'c'),(4, 4, 'd'),(5, 5, 'e'),(6, NULL, 'f')")
+      checkAnswer(
+        spark.sql("SELECT * FROM dv_test ORDER BY c1 ASC NULLS FIRST LIMIT 3"),
+        Row(6, null, "f") :: Row(1, 1, "a") :: Row(2, 2, "b") :: Nil)
+      checkAnswer(
+        spark.sql("SELECT * FROM dv_test ORDER BY c1 ASC NULLS LAST LIMIT 3"),
+        Row(1, 1, "a") :: Row(2, 2, "b") :: Row(3, 3, "c") :: Nil)
+      checkAnswer(
+        spark.sql("SELECT * FROM dv_test ORDER BY c1 DESC NULLS FIRST LIMIT 3"),
+        Row(6, null, "f") :: Row(5, 5, "e") :: Row(4, 4, "d") :: Nil)
+      checkAnswer(
+        spark.sql("SELECT * FROM dv_test ORDER BY c1 DESC NULLS LAST LIMIT 3"),
+        Row(5, 5, "e") :: Row(4, 4, "d") :: Row(3, 3, "c") :: Nil)
+
+      spark.sql("delete from dv_test where id IN (1, 5)")
+
+      checkAnswer(
+        spark.sql("SELECT * FROM dv_test ORDER BY c1 ASC NULLS FIRST LIMIT 3"),
+        Row(6, null, "f") :: Row(2, 2, "b") :: Row(3, 3, "c") :: Nil)
+      checkAnswer(
+        spark.sql("SELECT * FROM dv_test ORDER BY c1 ASC NULLS LAST LIMIT 3"),
+        Row(2, 2, "b") :: Row(3, 3, "c") :: Row(4, 4, "d") :: Nil)
+      checkAnswer(
+        spark.sql("SELECT * FROM dv_test ORDER BY c1 DESC NULLS FIRST LIMIT 3"),
+        Row(6, null, "f") :: Row(4, 4, "d") :: Row(3, 3, "c") :: Nil)
+      checkAnswer(
+        spark.sql("SELECT * FROM dv_test ORDER BY c1 DESC NULLS LAST LIMIT 3"),
+        Row(4, 4, "d") :: Row(3, 3, "c") :: Row(2, 2, "b") :: Nil)
+    }
+  }
+
+  test("Paimon pushDown: TopN for append-only tables with deletion vector") {
+    assume(gteqSpark3_3)
+    withTable("dv_test") {
+      spark.sql("""
+                  |CREATE TABLE dv_test (c1 INT, c2 STRING) TBLPROPERTIES (
+                  |'deletion-vectors.enabled' = 'true',
+                  |'file-index.range-bitmap.columns'='c1'
+                  |)
+                  |""".stripMargin)
+
+      spark.sql(
+        "insert into table dv_test values(1, 'a'),(2, 'b'),(3, 'c'),(4, 'd'),(5, 'e'),(NULL, 'f')")
+      checkAnswer(
+        spark.sql("SELECT * FROM dv_test ORDER BY c1 ASC NULLS FIRST LIMIT 3"),
+        Row(null, "f") :: Row(1, "a") :: Row(2, "b") :: Nil)
+      checkAnswer(
+        spark.sql("SELECT * FROM dv_test ORDER BY c1 ASC NULLS LAST LIMIT 3"),
+        Row(1, "a") :: Row(2, "b") :: Row(3, "c") :: Nil)
+      checkAnswer(
+        spark.sql("SELECT * FROM dv_test ORDER BY c1 DESC NULLS FIRST LIMIT 3"),
+        Row(null, "f") :: Row(5, "e") :: Row(4, "d") :: Nil)
+      checkAnswer(
+        spark.sql("SELECT * FROM dv_test ORDER BY c1 DESC NULLS LAST LIMIT 3"),
+        Row(5, "e") :: Row(4, "d") :: Row(3, "c") :: Nil)
+
+      spark.sql("delete from dv_test where c1 IN (1, 5)")
+
+      checkAnswer(
+        spark.sql("SELECT * FROM dv_test ORDER BY c1 ASC NULLS FIRST LIMIT 3"),
+        Row(null, "f") :: Row(2, "b") :: Row(3, "c") :: Nil)
+      checkAnswer(
+        spark.sql("SELECT * FROM dv_test ORDER BY c1 ASC NULLS LAST LIMIT 3"),
+        Row(2, "b") :: Row(3, "c") :: Row(4, "d") :: Nil)
+      checkAnswer(
+        spark.sql("SELECT * FROM dv_test ORDER BY c1 DESC NULLS FIRST LIMIT 3"),
+        Row(null, "f") :: Row(4, "d") :: Row(3, "c") :: Nil)
+      checkAnswer(
+        spark.sql("SELECT * FROM dv_test ORDER BY c1 DESC NULLS LAST LIMIT 3"),
+        Row(4, "d") :: Row(3, "c") :: Row(2, "b") :: Nil)
+    }
+  }
+
+  test(s"Paimon pushdown: parquet in-filter") {
+    withTable("T") {
+      spark.sql(s"""
+                   |CREATE TABLE T (a INT, b STRING) using paimon TBLPROPERTIES
+                   |(
+                   |'file.format' = 'parquet',
+                   |'parquet.block.size' = '100',
+                   |'target-file-size' = '10g',
+                   |'parquet.filter.stats.enabled' = 'false' -- disable stats filter
+                   |)
+                   |""".stripMargin)
+
+      val data = (0 to 1000).flatMap {
+        i =>
+          val uuid = java.util.UUID.randomUUID().toString
+          List.fill(10)((i, uuid))
+      }
+      data.toDF("a", "b").createOrReplaceTempView("source")
+      spark.sql("insert into T select * from source cluster by a")
+      val rows = spark.sql(s"select * from T where a in (${(100 to 150).mkString(",")})").collect()
+      val expected =
+        spark.sql(s"select * from source where a in (${(100 to 150).mkString(",")})").collect()
+
+      assertj.assertThat(rows).containsExactlyInAnyOrder(expected: _*)
     }
   }
 

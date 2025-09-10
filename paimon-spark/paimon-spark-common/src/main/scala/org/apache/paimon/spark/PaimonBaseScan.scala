@@ -24,7 +24,7 @@ import org.apache.paimon.predicate.Predicate
 import org.apache.paimon.spark.metric.SparkMetricRegistry
 import org.apache.paimon.spark.sources.PaimonMicroBatchStream
 import org.apache.paimon.spark.statistics.StatisticsHelper
-import org.apache.paimon.table.{DataTable, FileStoreTable, Table}
+import org.apache.paimon.table.{DataTable, InnerTable}
 import org.apache.paimon.table.source.{InnerTableScan, Split}
 
 import org.apache.spark.sql.connector.metric.{CustomMetric, CustomTaskMetric}
@@ -38,7 +38,7 @@ import java.util.Optional
 import scala.collection.JavaConverters._
 
 abstract class PaimonBaseScan(
-    table: Table,
+    table: InnerTable,
     requiredSchema: StructType,
     filters: Seq[Predicate],
     reservedFilters: Seq[Filter],
@@ -106,30 +106,19 @@ abstract class PaimonBaseScan(
   }
 
   override def supportedCustomMetrics: Array[CustomMetric] = {
-    val paimonMetrics: Array[CustomMetric] = table match {
-      case _: FileStoreTable =>
-        Array(
-          PaimonNumSplitMetric(),
-          PaimonSplitSizeMetric(),
-          PaimonAvgSplitSizeMetric(),
-          PaimonPlanningDurationMetric(),
-          PaimonScannedManifestsMetric(),
-          PaimonSkippedTableFilesMetric(),
-          PaimonResultedTableFilesMetric()
-        )
-      case _ =>
-        Array.empty[CustomMetric]
-    }
-    super.supportedCustomMetrics() ++ paimonMetrics
+    Array(
+      PaimonNumSplitMetric(),
+      PaimonSplitSizeMetric(),
+      PaimonAvgSplitSizeMetric(),
+      PaimonPlanningDurationMetric(),
+      PaimonScannedManifestsMetric(),
+      PaimonSkippedTableFilesMetric(),
+      PaimonResultedTableFilesMetric()
+    )
   }
 
   override def reportDriverMetrics(): Array[CustomTaskMetric] = {
-    table match {
-      case _: FileStoreTable =>
-        paimonMetricsRegistry.buildSparkScanMetrics()
-      case _ =>
-        Array.empty[CustomTaskMetric]
-    }
+    paimonMetricsRegistry.buildSparkScanMetrics()
   }
 
   override def description(): String = {
@@ -138,7 +127,12 @@ abstract class PaimonBaseScan(
     } else {
       ""
     }
-    s"PaimonScan: [${table.name}]" + pushedFiltersStr +
+    val pushedTopNFilterStr = if (pushDownTopN.nonEmpty) {
+      s", PushedTopNFilter: [${pushDownTopN.get.toString}]"
+    } else {
+      ""
+    }
+    s"PaimonScan: [${table.name}]" + pushedFiltersStr + pushedTopNFilterStr +
       pushDownLimit.map(limit => s", Limit: [$limit]").getOrElse("")
   }
 }

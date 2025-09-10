@@ -139,7 +139,7 @@ public class CommitMessageLegacyV2Serializer {
 
         @Override
         public DataFileMeta fromRow(InternalRow row) {
-            return new DataFileMeta(
+            return DataFileMeta.create(
                     row.getString(0).toString(),
                     row.getLong(1),
                     row.getLong(2),
@@ -153,6 +153,8 @@ public class CommitMessageLegacyV2Serializer {
                     row.getInt(10),
                     fromStringArrayData(row.getArray(11)),
                     row.getTimestamp(12, 3),
+                    null,
+                    null,
                     null,
                     null,
                     null,
@@ -184,6 +186,7 @@ public class CommitMessageLegacyV2Serializer {
                     row.getString(1).toString(),
                     row.getLong(2),
                     row.getLong(3),
+                    null,
                     null);
         }
     }

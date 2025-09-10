@@ -16,17 +16,18 @@
 #  under the License.
 
 from abc import ABC, abstractmethod
-from datetime import datetime, timezone
 from dataclasses import dataclass
-from typing import Optional, Dict
+from datetime import datetime, timezone
+from typing import Dict, Optional
 from urllib.parse import urljoin
+
 import requests
 from requests.adapters import HTTPAdapter
 from requests.exceptions import RequestException
 
-from .rest_json import json_field, JSON
-from .typedef import RESTCatalogOptions
-from .client import ExponentialRetry
+from pypaimon.api.client import ExponentialRetry
+from pypaimon.common.config import CatalogOptions
+from pypaimon.common.json_util import JSON, json_field
 
 
 @dataclass
@@ -59,15 +60,15 @@ class DLFToken:
 
     @classmethod
     def from_options(cls, options: Dict[str, str]) -> Optional['DLFToken']:
-        from .typedef import RESTCatalogOptions
-        if (options.get(RESTCatalogOptions.DLF_ACCESS_KEY_ID) is None
-                or options.get(RESTCatalogOptions.DLF_ACCESS_KEY_SECRET) is None):
+        from pypaimon.common.config import CatalogOptions
+        if (options.get(CatalogOptions.DLF_ACCESS_KEY_ID) is None
+                or options.get(CatalogOptions.DLF_ACCESS_KEY_SECRET) is None):
             return None
         else:
             return cls(
-                access_key_id=options.get(RESTCatalogOptions.DLF_ACCESS_KEY_ID),
-                access_key_secret=options.get(RESTCatalogOptions.DLF_ACCESS_KEY_SECRET),
-                security_token=options.get(RESTCatalogOptions.DLF_ACCESS_SECURITY_TOKEN)
+                access_key_id=options.get(CatalogOptions.DLF_ACCESS_KEY_ID),
+                access_key_secret=options.get(CatalogOptions.DLF_ACCESS_KEY_SECRET),
+                security_token=options.get(CatalogOptions.DLF_ACCESS_SECURITY_TOKEN)
             )
 
 
@@ -151,7 +152,7 @@ class DLFECSTokenLoader(DLFTokenLoader):
             return self._get_token(token_url)
 
         except Exception as e:
-            raise RuntimeError(f"Token loading failed: {e}") from e
+            raise RuntimeError("Token loading failed: {}".format(e)) from e
 
     def description(self) -> str:
         return self.ecs_metadata_url
@@ -160,7 +161,7 @@ class DLFECSTokenLoader(DLFTokenLoader):
         try:
             return self._get_response_body(url)
         except Exception as e:
-            raise RuntimeError(f"Get role failed, error: {e}") from e
+            raise RuntimeError("Get role failed, error: {}".format(e)) from e
 
     def _get_token(self, url: str) -> DLFToken:
         try:
@@ -168,9 +169,9 @@ class DLFECSTokenLoader(DLFTokenLoader):
             return JSON.from_json(token_json, DLFToken)
         except OSError as e:
             # Python equivalent of UncheckedIOException
-            raise OSError(f"IO error while getting token: {e}") from e
+            raise OSError("IO error while getting token: {}".format(e)) from e
         except Exception as e:
-            raise RuntimeError(f"Get token failed, error: {e}") from e
+            raise RuntimeError("Get token failed, error: {}".format(e)) from e
 
     def _get_response_body(self, url: str) -> str:
         try:
@@ -181,7 +182,9 @@ class DLFECSTokenLoader(DLFTokenLoader):
                 raise RuntimeError("Get response failed, response is None")
 
             if not response.ok:
-                raise RuntimeError(f"Get response failed, response: {response.status_code} {response.reason}")
+                raise RuntimeError("Get response failed, response: {} {}".format(
+                    response.status_code, response.reason
+                ))
 
             response_body = response.text
             if response_body is None:
@@ -192,9 +195,9 @@ class DLFECSTokenLoader(DLFTokenLoader):
             # Re-raise RuntimeError as-is
             raise
         except RequestException as e:
-            raise RuntimeError(f"Request failed: {e}") from e
+            raise RuntimeError("Request failed: {}".format(e)) from e
         except Exception as e:
-            raise RuntimeError(f"Get response failed, error: {e}") from e
+            raise RuntimeError("Get response failed, error: {}".format(e)) from e
 
 
 # Factory and utility functions
@@ -204,12 +207,12 @@ class DLFTokenLoaderFactory:
     @staticmethod
     def create_token_loader(options: Dict[str, str]) -> Optional['DLFTokenLoader']:
         """Create ECS token loader"""
-        loader = options.get(RESTCatalogOptions.DLF_TOKEN_LOADER)
+        loader = options.get(CatalogOptions.DLF_TOKEN_LOADER)
         if loader == 'ecs':
             ecs_metadata_url = options.get(
-                RESTCatalogOptions.DLF_TOKEN_ECS_METADATA_URL,
+                CatalogOptions.DLF_TOKEN_ECS_METADATA_URL,
                 'http://100.100.100.200/latest/meta-data/Ram/security-credentials/'
             )
-            role_name = options.get(RESTCatalogOptions.DLF_TOKEN_ECS_ROLE_NAME)
+            role_name = options.get(CatalogOptions.DLF_TOKEN_ECS_ROLE_NAME)
             return DLFECSTokenLoader(ecs_metadata_url, role_name)
         return None

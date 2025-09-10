@@ -350,6 +350,8 @@ public class ChangelogCompactCoordinateOperatorTest {
                 null,
                 null,
                 null,
+                null,
+                null,
                 null);
     }
 

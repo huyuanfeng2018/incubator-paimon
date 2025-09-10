@@ -19,11 +19,14 @@
 package org.apache.paimon.table.source;
 
 import org.apache.paimon.data.BinaryRow;
+import org.apache.paimon.data.InternalArray;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.io.DataFileMeta;
 import org.apache.paimon.io.DataFileMeta08Serializer;
 import org.apache.paimon.io.DataFileMeta09Serializer;
 import org.apache.paimon.io.DataFileMeta10LegacySerializer;
+import org.apache.paimon.io.DataFileMeta12LegacySerializer;
+import org.apache.paimon.io.DataFileMetaFirstRowIdLegacySerializer;
 import org.apache.paimon.io.DataFileMetaSerializer;
 import org.apache.paimon.io.DataInputView;
 import org.apache.paimon.io.DataInputViewStreamWrapper;
@@ -33,6 +36,7 @@ import org.apache.paimon.predicate.CompareUtils;
 import org.apache.paimon.stats.SimpleStatsEvolution;
 import org.apache.paimon.stats.SimpleStatsEvolutions;
 import org.apache.paimon.types.DataField;
+import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.utils.FunctionWithIOException;
 import org.apache.paimon.utils.InternalRowUtils;
 import org.apache.paimon.utils.SerializationUtils;
@@ -58,7 +62,7 @@ public class DataSplit implements Split {
 
     private static final long serialVersionUID = 7L;
     private static final long MAGIC = -2394839472490812314L;
-    private static final int VERSION = 6;
+    private static final int VERSION = 8;
 
     private long snapshotId = 0;
     private BinaryRow partition;
@@ -188,6 +192,26 @@ public class DataSplit implements Split {
             }
         }
         return maxValue;
+    }
+
+    public Long nullCount(int fieldIndex, SimpleStatsEvolutions evolutions) {
+        Long sum = null;
+        for (DataFileMeta dataFile : dataFiles) {
+            SimpleStatsEvolution evolution = evolutions.getOrCreate(dataFile.schemaId());
+            InternalArray nullCounts =
+                    evolution.evolution(
+                            dataFile.valueStats().nullCounts(),
+                            dataFile.rowCount(),
+                            dataFile.valueStatsCols());
+            Long nullCount =
+                    (Long) InternalRowUtils.get(nullCounts, fieldIndex, DataTypes.BIGINT());
+            if (sum == null) {
+                sum = nullCount;
+            } else if (nullCount != null) {
+                sum += nullCount;
+            }
+        }
+        return sum;
     }
 
     /**
@@ -426,7 +450,14 @@ public class DataSplit implements Split {
         } else if (version == 3 || version == 4) {
             DataFileMeta10LegacySerializer serializer = new DataFileMeta10LegacySerializer();
             return serializer::deserialize;
-        } else if (version >= 5) {
+        } else if (version == 5 || version == 6) {
+            DataFileMeta12LegacySerializer serializer = new DataFileMeta12LegacySerializer();
+            return serializer::deserialize;
+        } else if (version == 7) {
+            DataFileMetaFirstRowIdLegacySerializer serializer =
+                    new DataFileMetaFirstRowIdLegacySerializer();
+            return serializer::deserialize;
+        } else if (version == 8) {
             DataFileMetaSerializer serializer = new DataFileMetaSerializer();
             return serializer::deserialize;
         } else {

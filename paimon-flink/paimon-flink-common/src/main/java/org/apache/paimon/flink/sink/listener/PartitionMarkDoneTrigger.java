@@ -30,6 +30,8 @@ import org.apache.flink.api.common.state.ListStateDescriptor;
 import org.apache.flink.api.common.state.OperatorStateStore;
 import org.apache.flink.api.common.typeutils.base.ListSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
 
@@ -43,6 +45,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.apache.paimon.CoreOptions.PARTITION_MARK_DONE_WHEN_END_INPUT;
 import static org.apache.paimon.flink.FlinkConnectorOptions.PARTITION_IDLE_TIME_TO_DONE;
@@ -52,6 +55,7 @@ import static org.apache.paimon.utils.PartitionPathUtils.extractPartitionSpecFro
 /** Trigger to mark partitions done with streaming job. */
 public class PartitionMarkDoneTrigger {
 
+    private static final Logger LOG = LoggerFactory.getLogger(PartitionMarkDoneTrigger.class);
     private static final ListStateDescriptor<List<String>> PENDING_PARTITIONS_STATE_DESC =
             new ListStateDescriptor<>(
                     "mark-done-pending-partitions",
@@ -128,46 +132,85 @@ public class PartitionMarkDoneTrigger {
         if (timeInterval == null || idleTime == null) {
             return Collections.emptyList();
         }
+        LOG.debug(
+                "End input is true and markDoneWhenEndInput is enabled, mark all pending partitions done: {}",
+                String.join(",", pendingPartitions.keySet()));
 
         List<String> needDone = new ArrayList<>();
         Iterator<Map.Entry<String, Long>> iter = pendingPartitions.entrySet().iterator();
         while (iter.hasNext()) {
             Map.Entry<String, Long> entry = iter.next();
             String partition = entry.getKey();
-
             long lastUpdateTime = entry.getValue();
+            LOG.debug(
+                    "Partition {} is in progress, last update time: {}",
+                    partition,
+                    entry.getValue());
+
             long partitionStartTime;
+            Optional<LocalDateTime> partitionLocalDateTimeOpt = extractDateTime(partition);
+            // skip illegal partition
+            if (!partitionLocalDateTimeOpt.isPresent()) {
+                LOG.debug("Partition {} is illegal, skip it", partition);
+                iter.remove();
+                continue;
+            }
+
             if (watermarkEnabled) {
                 // watermark should be compared as UTC time
                 partitionStartTime =
-                        extractDateTime(partition)
+                        partitionLocalDateTimeOpt
+                                .get()
                                 .atZone(ZoneId.of("UTC"))
                                 .toInstant()
                                 .toEpochMilli();
             } else {
                 partitionStartTime =
-                        extractDateTime(partition)
+                        partitionLocalDateTimeOpt
+                                .get()
                                 .atZone(ZoneId.systemDefault())
                                 .toInstant()
                                 .toEpochMilli();
             }
             long partitionEndTime = partitionStartTime + timeInterval;
             lastUpdateTime = Math.max(lastUpdateTime, partitionEndTime);
+            LOG.debug(
+                    "Partition {} start time: {}, end time: {}, last update time after compare: {}",
+                    partition,
+                    partitionStartTime,
+                    partitionEndTime,
+                    lastUpdateTime);
 
             if (currentTimeMillis - lastUpdateTime > idleTime) {
+                LOG.debug(
+                        "Partition {} is idle for {} greater than idleTime {}, mark it done",
+                        partition,
+                        currentTimeMillis - lastUpdateTime,
+                        idleTime);
                 needDone.add(partition);
                 iter.remove();
+            } else {
+                LOG.debug(
+                        "Partition {} is idle for {} less than idleTime {}, no not mark it done",
+                        partition,
+                        currentTimeMillis - lastUpdateTime,
+                        idleTime);
             }
         }
+        LOG.debug("Need done partitions: {}", String.join(",", needDone));
         return needDone;
     }
 
     @VisibleForTesting
-    LocalDateTime extractDateTime(String partition) {
+    Optional<LocalDateTime> extractDateTime(String partition) {
         try {
-            return timeExtractor.extract(extractPartitionSpecFromPath(new Path(partition)));
+            return Optional.of(
+                    timeExtractor.extract(extractPartitionSpecFromPath(new Path(partition))));
         } catch (DateTimeParseException e) {
-            throw new RuntimeException("Can't extract datetime from partition " + partition, e);
+            LOG.warn(
+                    "Can't extract datetime from partition {}, please check configuration items 'partition.timestamp-formatter' and 'partition.timestamp-pattern'.",
+                    partition);
+            return Optional.empty();
         }
     }
 

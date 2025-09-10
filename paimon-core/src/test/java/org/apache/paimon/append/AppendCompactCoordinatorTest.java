@@ -245,7 +245,7 @@ public class AppendCompactCoordinatorTest {
     }
 
     private DataFileMeta newFile(long fileSize) {
-        return new DataFileMeta(
+        return DataFileMeta.create(
                 UUID.randomUUID().toString(),
                 fileSize,
                 100,
@@ -260,6 +260,8 @@ public class AppendCompactCoordinatorTest {
                 0L,
                 null,
                 FileSource.APPEND,
+                null,
+                null,
                 null);
     }
 }

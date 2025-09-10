@@ -122,7 +122,7 @@ public class DataFileMeta09Serializer implements Serializable {
         byte[] bytes = new byte[in.readInt()];
         in.readFully(bytes);
         SafeBinaryRow row = new SafeBinaryRow(rowSerializer.getArity(), bytes, 0);
-        return new DataFileMeta(
+        return DataFileMeta.create(
                 row.getString(0).toString(),
                 row.getLong(1),
                 row.getLong(2),
@@ -139,6 +139,8 @@ public class DataFileMeta09Serializer implements Serializable {
                 row.isNullAt(13) ? null : row.getLong(13),
                 row.isNullAt(14) ? null : row.getBinary(14),
                 row.isNullAt(15) ? null : FileSource.fromByteValue(row.getByte(15)),
+                null,
+                null,
                 null,
                 null);
     }

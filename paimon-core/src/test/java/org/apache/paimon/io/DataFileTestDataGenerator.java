@@ -150,7 +150,7 @@ public class DataFileTestDataGenerator {
         return new Data(
                 partition,
                 bucket,
-                new DataFileMeta(
+                DataFileMeta.create(
                         "data-" + UUID.randomUUID(),
                         totalSize,
                         kvs.size(),
@@ -165,6 +165,8 @@ public class DataFileTestDataGenerator {
                         kvs.stream().filter(kv -> kv.valueKind().isRetract()).count(),
                         null,
                         FileSource.APPEND,
+                        null,
+                        null,
                         null),
                 kvs);
     }

@@ -296,6 +296,15 @@ CREATE TABLE test_computed_column (
     PRIMARY KEY (pk)
 );
 
+CREATE TABLE test_computed_column2 (
+    pk INT,
+    _date DATE,
+    _datetime DATETIME,
+    _timestamp TIMESTAMP,
+    _value VARCHAR(10),
+    PRIMARY KEY (pk)
+);
+
 CREATE TABLE test_time_to_int_epoch (
     pk INT,
     _second_val0 INT,
@@ -457,3 +466,14 @@ CREATE TABLE t (
                    k INT PRIMARY KEY,
                    v1 VARCHAR(10)
 );
+
+-- ################################################################################
+--  testSyncPrimaryKeysFromSourceSchema{True/False}
+-- ################################################################################
+CREATE DATABASE check_sync_primary_keys_from_source_schema;
+USE check_sync_primary_keys_from_source_schema;
+CREATE TABLE t (
+    k INT PRIMARY KEY,
+    v1 VARCHAR(10)
+);
+INSERT INTO t VALUES (1, 'Apache'), (2, 'Paimon');

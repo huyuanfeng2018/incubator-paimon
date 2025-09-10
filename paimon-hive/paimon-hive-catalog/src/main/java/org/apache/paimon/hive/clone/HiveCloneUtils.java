@@ -31,6 +31,7 @@ import org.apache.hadoop.hive.metastore.api.Database;
 import org.apache.hadoop.hive.metastore.api.FieldSchema;
 import org.apache.hadoop.hive.metastore.api.Partition;
 import org.apache.hadoop.hive.metastore.api.PrimaryKeysRequest;
+import org.apache.hadoop.hive.metastore.api.SerDeInfo;
 import org.apache.hadoop.hive.metastore.api.StorageDescriptor;
 import org.apache.hadoop.hive.metastore.api.Table;
 import org.slf4j.Logger;
@@ -56,6 +57,8 @@ public class HiveCloneUtils {
     public static final Predicate<FileStatus> HIDDEN_PATH_FILTER =
             p -> !p.getPath().getName().startsWith("_") && !p.getPath().getName().startsWith(".");
 
+    public static final String SUPPORT_CLONE_SPLITS = "support.clone.splits";
+
     public static Map<String, String> getDatabaseOptions(
             HiveCatalog hiveCatalog, String databaseName) throws Exception {
         IMetaStoreClient client = hiveCatalog.getHmsClient();
@@ -68,7 +71,14 @@ public class HiveCloneUtils {
     }
 
     public static List<Identifier> listTables(
-            HiveCatalog hiveCatalog, @Nullable List<String> excludedTables) throws Exception {
+            HiveCatalog hiveCatalog,
+            @Nullable List<String> includedTables,
+            @Nullable List<String> excludedTables)
+            throws Exception {
+        Set<String> includedTableSet = new HashSet<>();
+        if (CollectionUtils.isNotEmpty(includedTables)) {
+            includedTableSet.addAll(includedTables);
+        }
         Set<String> excludedTableSet = new HashSet<>();
         if (CollectionUtils.isNotEmpty(excludedTables)) {
             excludedTableSet.addAll(excludedTables);
@@ -81,15 +91,25 @@ public class HiveCloneUtils {
                 if (excludedTableSet.contains(identifier.getFullName())) {
                     continue;
                 }
-                results.add(identifier);
+                if (CollectionUtils.isEmpty(includedTableSet)
+                        || includedTableSet.contains(identifier.getFullName())) {
+                    results.add(identifier);
+                }
             }
         }
         return results;
     }
 
     public static List<Identifier> listTables(
-            HiveCatalog hiveCatalog, String database, @Nullable List<String> excludedTables)
+            HiveCatalog hiveCatalog,
+            String database,
+            @Nullable List<String> includedTables,
+            @Nullable List<String> excludedTables)
             throws Exception {
+        Set<String> includedTableSet = new HashSet<>();
+        if (CollectionUtils.isNotEmpty(includedTables)) {
+            includedTableSet.addAll(includedTables);
+        }
         Set<String> excludedTableSet = new HashSet<>();
         if (CollectionUtils.isNotEmpty(excludedTables)) {
             excludedTableSet.addAll(excludedTables);
@@ -101,7 +121,10 @@ public class HiveCloneUtils {
             if (excludedTableSet.contains(identifier.getFullName())) {
                 continue;
             }
-            results.add(identifier);
+            if (CollectionUtils.isEmpty(includedTableSet)
+                    || includedTableSet.contains(identifier.getFullName())) {
+                results.add(identifier);
+            }
         }
         return results;
     }
@@ -166,14 +189,28 @@ public class HiveCloneUtils {
                         predicate);
     }
 
-    private static String parseFormat(StorageDescriptor storageDescriptor) {
-        String serder = storageDescriptor.getSerdeInfo().toString();
-        if (serder.contains("avro")) {
+    private static String parseFormat(StorageDescriptor sd) {
+        SerDeInfo serdeInfo = sd.getSerdeInfo();
+        if (serdeInfo == null) {
+            return null;
+        }
+        String serLib =
+                serdeInfo.getSerializationLib() == null
+                        ? ""
+                        : serdeInfo.getSerializationLib().toLowerCase();
+        String inputFormat = sd.getInputFormat() == null ? "" : sd.getInputFormat();
+        if (serLib.contains("avro")) {
             return "avro";
-        } else if (serder.contains("parquet")) {
+        } else if (serLib.contains("parquet")) {
             return "parquet";
-        } else if (serder.contains("orc")) {
+        } else if (serLib.contains("orc")) {
             return "orc";
+        } else if (inputFormat.contains("Text")) {
+            if (serLib.contains("json")) {
+                return "json";
+            } else {
+                return "csv";
+            }
         }
         return null;
     }

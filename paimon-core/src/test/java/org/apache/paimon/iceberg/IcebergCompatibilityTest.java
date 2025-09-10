@@ -55,6 +55,8 @@ import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.RowKind;
 import org.apache.paimon.types.RowType;
 
+import org.apache.avro.Schema.Field;
+import org.apache.avro.Schema.Type;
 import org.apache.avro.file.DataFileReader;
 import org.apache.avro.file.SeekableFileInput;
 import org.apache.avro.generic.GenericData;
@@ -84,6 +86,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
@@ -471,6 +474,8 @@ public class IcebergCompatibilityTest {
                 RowType.of(
                         new DataType[] {
                             DataTypes.INT(),
+                            DataTypes.TINYINT(),
+                            DataTypes.SMALLINT(),
                             DataTypes.BOOLEAN(),
                             DataTypes.BIGINT(),
                             DataTypes.FLOAT(),
@@ -485,6 +490,8 @@ public class IcebergCompatibilityTest {
                         },
                         new String[] {
                             "v_int",
+                            "v_tinyint",
+                            "v_smallint",
                             "v_boolean",
                             "v_bigint",
                             "v_float",
@@ -507,6 +514,8 @@ public class IcebergCompatibilityTest {
         GenericRow lowerBounds =
                 GenericRow.of(
                         1,
+                        (byte) 1,
+                        (short) 1,
                         true,
                         10L,
                         100.0f,
@@ -522,6 +531,8 @@ public class IcebergCompatibilityTest {
         GenericRow upperBounds =
                 GenericRow.of(
                         2,
+                        (byte) 3,
+                        (short) 4,
                         true,
                         20L,
                         200.0f,
@@ -583,7 +594,21 @@ public class IcebergCompatibilityTest {
                                     icebergTable ->
                                             IcebergGenerics.read(icebergTable)
                                                     .select(name)
-                                                    .where(Expressions.lessThan(name, upper))
+                                                    .where(
+                                                            // Handle numeric primitive wrappers
+                                                            // that need conversion
+                                                            upper instanceof Short
+                                                                    ? Expressions.lessThan(
+                                                                            name,
+                                                                            ((Short) upper)
+                                                                                    .intValue())
+                                                                    : upper instanceof Byte
+                                                                            ? Expressions.lessThan(
+                                                                                    name,
+                                                                                    ((Byte) upper)
+                                                                                            .intValue())
+                                                                            : Expressions.lessThan(
+                                                                                    name, upper))
                                                     .build(),
                                     Record::toString))
                     .containsExactly("Record(" + expectedLower + ")");
@@ -592,7 +617,25 @@ public class IcebergCompatibilityTest {
                                     icebergTable ->
                                             IcebergGenerics.read(icebergTable)
                                                     .select(name)
-                                                    .where(Expressions.greaterThan(name, lower))
+                                                    .where(
+                                                            // Handle numeric primitive wrappers
+                                                            // that need conversion
+                                                            lower instanceof Short
+                                                                    ? Expressions.greaterThan(
+                                                                            name,
+                                                                            ((Short) lower)
+                                                                                    .intValue())
+                                                                    : lower instanceof Byte
+                                                                            ? Expressions
+                                                                                    .greaterThan(
+                                                                                            name,
+                                                                                            ((Byte)
+                                                                                                            lower)
+                                                                                                    .intValue())
+                                                                            : Expressions
+                                                                                    .greaterThan(
+                                                                                            name,
+                                                                                            lower))
                                                     .build(),
                                     Record::toString))
                     .containsExactly("Record(" + expectedUpper + ")");
@@ -601,7 +644,21 @@ public class IcebergCompatibilityTest {
                                     icebergTable ->
                                             IcebergGenerics.read(icebergTable)
                                                     .select(name)
-                                                    .where(Expressions.lessThan(name, lower))
+                                                    .where(
+                                                            // Handle numeric primitive wrappers
+                                                            // that need conversion
+                                                            lower instanceof Short
+                                                                    ? Expressions.lessThan(
+                                                                            name,
+                                                                            ((Short) lower)
+                                                                                    .intValue())
+                                                                    : lower instanceof Byte
+                                                                            ? Expressions.lessThan(
+                                                                                    name,
+                                                                                    ((Byte) lower)
+                                                                                            .intValue())
+                                                                            : Expressions.lessThan(
+                                                                                    name, lower))
                                                     .build(),
                                     Record::toString))
                     .isEmpty();
@@ -610,7 +667,25 @@ public class IcebergCompatibilityTest {
                                     icebergTable ->
                                             IcebergGenerics.read(icebergTable)
                                                     .select(name)
-                                                    .where(Expressions.greaterThan(name, upper))
+                                                    .where(
+                                                            // Handle numeric primitive wrappers
+                                                            // that need conversion
+                                                            upper instanceof Short
+                                                                    ? Expressions.greaterThan(
+                                                                            name,
+                                                                            ((Short) upper)
+                                                                                    .intValue())
+                                                                    : upper instanceof Byte
+                                                                            ? Expressions
+                                                                                    .greaterThan(
+                                                                                            name,
+                                                                                            ((Byte)
+                                                                                                            upper)
+                                                                                                    .intValue())
+                                                                            : Expressions
+                                                                                    .greaterThan(
+                                                                                            name,
+                                                                                            upper))
                                                     .build(),
                                     Record::toString))
                     .isEmpty();
@@ -875,7 +950,7 @@ public class IcebergCompatibilityTest {
         table.createTag(tagV3, 3);
 
         long latestSnapshotId = table.snapshotManager().latestSnapshotId();
-        Map<String, IcebergRef> refs = getRefsFromSnapshot(table, latestSnapshotId);
+        Map<String, IcebergRef> refs = getIcebergRefsFromSnapshot(table, latestSnapshotId);
 
         assertThat(refs.size() == 2).isTrue();
 
@@ -907,7 +982,8 @@ public class IcebergCompatibilityTest {
 
         table.deleteTag(tagV1);
 
-        Map<String, IcebergRef> refsAfterDelete = getRefsFromSnapshot(table, latestSnapshotId);
+        Map<String, IcebergRef> refsAfterDelete =
+                getIcebergRefsFromSnapshot(table, latestSnapshotId);
 
         assertThat(refsAfterDelete.size() == 1).isTrue();
         assertThat(refsAfterDelete.get(tagV3).snapshotId() == latestSnapshotId).isTrue();
@@ -927,13 +1003,110 @@ public class IcebergCompatibilityTest {
         commit.close();
     }
 
+    // Create snapshots and Iceberg metadata
+    // Delete Iceberg metadata
+    // Create tag - this should not create any metadata file
+    // Delete tag - this should not create any metadata file
+    @Test
+    public void testTagCallbackTakesNoActionIfIcebergMetadataDoesNotExist() throws Exception {
+        RowType rowType =
+                RowType.of(
+                        new DataType[] {DataTypes.INT(), DataTypes.INT()}, new String[] {"k", "v"});
+        FileStoreTable table =
+                createPaimonTable(
+                        rowType, Collections.emptyList(), Collections.singletonList("k"), 1);
+
+        String commitUser = UUID.randomUUID().toString();
+        TableWriteImpl<?> write = table.newWrite(commitUser);
+        TableCommitImpl commit = table.newCommit(commitUser);
+
+        write.write(GenericRow.of(1, 10));
+        write.write(GenericRow.of(2, 20));
+        commit.commit(1, write.prepareCommit(false, 1));
+
+        assertThat(getIcebergResult()).containsExactlyInAnyOrder("Record(1, 10)", "Record(2, 20)");
+
+        // Delete Iceberg metadata
+        Path metadataPath = new Path(table.location(), "metadata");
+        table.fileIO().deleteDirectoryQuietly(metadataPath);
+
+        assertThat(table.fileIO().listFiles(metadataPath, false).length == 0);
+
+        String tagV1 = "v1";
+        table.createTag(tagV1, 1);
+
+        assertThat(table.fileIO().listFiles(metadataPath, false).length == 0);
+
+        table.deleteTag(tagV1);
+
+        assertThat(table.fileIO().listFiles(metadataPath, false).length == 0);
+
+        write.close();
+        commit.close();
+    }
+
+    // Create snapshots and Iceberg metadata
+    // Delete Iceberg metadata
+    // Create a snapshot to create Iceberg metadata
+    // Create tag on a snapshot that does not exist in Iceberg - this should not add a tag.
+    @Test
+    public void testTagCallbackDoesNotAddTagIfSnapshotDoesNotExistInIceberg() throws Exception {
+        RowType rowType =
+                RowType.of(
+                        new DataType[] {DataTypes.INT(), DataTypes.INT()}, new String[] {"k", "v"});
+        FileStoreTable table =
+                createPaimonTable(
+                        rowType, Collections.emptyList(), Collections.singletonList("k"), 1);
+
+        String commitUser = UUID.randomUUID().toString();
+        TableWriteImpl<?> write = table.newWrite(commitUser);
+        TableCommitImpl commit = table.newCommit(commitUser);
+
+        write.write(GenericRow.of(1, 10));
+        write.write(GenericRow.of(2, 20));
+        commit.commit(1, write.prepareCommit(false, 1));
+
+        // Delete Iceberg metadata
+        Path metadataPath = new Path(table.location(), "metadata");
+        table.fileIO().deleteDirectoryQuietly(metadataPath);
+
+        write.write(GenericRow.of(3, 30));
+        write.write(GenericRow.of(4, 40));
+        write.compact(BinaryRow.EMPTY_ROW, 0, true);
+        commit.commit(2, write.prepareCommit(true, 2));
+
+        String tagV1 = "v1";
+        long tagV1SnapshotId = 1;
+        table.createTag(tagV1, tagV1SnapshotId);
+
+        assertThat(getIcebergResult())
+                .containsExactlyInAnyOrder(
+                        "Record(1, 10)", "Record(2, 20)", "Record(3, 30)", "Record(4, 40)");
+
+        assertThat(
+                        getIcebergRefsFromSnapshot(
+                                                table, table.snapshotManager().latestSnapshotId())
+                                        .size()
+                                == 0)
+                .isTrue();
+
+        write.close();
+        commit.close();
+    }
+
     /*
-    Create a snapshot and tag
+    Create a snapshot and tag t1
+    Verify t1 in Iceberg
     Delete Iceberg metadata
-    Commit again and verify that Iceberg metadata and tags are created
+    Create a snapshot
+    Verify Iceberg tags are empty
+    Create a snapshot and tag t5
+    Create a snapshot
+    Only t5 should be visible in Iceberg
      */
     @Test
-    public void testTagsCreateMetadataWithoutBase() throws Exception {
+    public void testTagsAreOnlyAddedToIcebergDuringCommitCallbackIfSnapshotExistsInIceberg()
+            throws Exception {
         RowType rowType =
                 RowType.of(
                         new DataType[] {DataTypes.INT(), DataTypes.INT()}, new String[] {"k", "v"});
@@ -950,7 +1123,8 @@ public class IcebergCompatibilityTest {
         commit.commit(1, write.prepareCommit(false, 1));
 
         String tagV1 = "v1";
-        table.createTag(tagV1, 1);
+        long tagV1SnapshotId = 1;
+        table.createTag(tagV1, tagV1SnapshotId);
 
         assertThat(getIcebergResult()).containsExactlyInAnyOrder("Record(1, 10)", "Record(2, 20)");
 
@@ -963,11 +1137,11 @@ public class IcebergCompatibilityTest {
                 .containsExactlyInAnyOrder(
                         "Record(1, 10)", "Record(2, 20)", "Record(3, 30)", "Record(4, 40)");
 
+        // Verify tag
         Map<String, IcebergRef> refs =
-                getRefsFromSnapshot(table, table.snapshotManager().latestSnapshotId());
-
+                getIcebergRefsFromSnapshot(table, table.snapshotManager().latestSnapshotId());
         assertThat(refs.size() == 1).isTrue();
-        assertThat(refs.get(tagV1).snapshotId() == 1).isTrue();
+        assertThat(refs.get(tagV1).snapshotId() == tagV1SnapshotId).isTrue();
 
         assertThat(
                         getIcebergResult(
@@ -986,13 +1160,39 @@ public class IcebergCompatibilityTest {
         write.compact(BinaryRow.EMPTY_ROW, 0, true);
         commit.commit(4, write.prepareCommit(true, 4));
 
-        Map<String, IcebergRef> refsAfterMetadataDelete =
-                getRefsFromSnapshot(table, table.snapshotManager().latestSnapshotId());
-        assertThat(refsAfterMetadataDelete.size() == 1).isTrue();
-        assertThat(refsAfterMetadataDelete.get(tagV1).snapshotId() == 1).isTrue();
+        refs = getIcebergRefsFromSnapshot(table, table.snapshotManager().latestSnapshotId());
+        assertThat(refs.size() == 0).isTrue();
+
+        String tagV5 = "v5";
+        long tagV5SnapshotId = 5;
+        table.createTag(tagV5, tagV5SnapshotId);
+
+        write.write(GenericRow.of(6, 60));
+        write.compact(BinaryRow.EMPTY_ROW, 0, true);
+        commit.commit(6, write.prepareCommit(true, 4));
+
+        refs = getIcebergRefsFromSnapshot(table, table.snapshotManager().latestSnapshotId());
+        assertThat(refs.size() == 1).isTrue();
+        assertThat(refs.get(tagV5).snapshotId() == tagV5SnapshotId).isTrue();
+
+        assertThat(
+                        getIcebergResult(
+                                icebergTable ->
+                                        IcebergGenerics.read(icebergTable)
+                                                .useSnapshot(
+                                                        icebergTable.refs().get(tagV5).snapshotId())
+                                                .build(),
+                                Record::toString))
+                .containsExactlyInAnyOrder(
+                        "Record(1, 10)",
+                        "Record(2, 20)",
+                        "Record(3, 30)",
+                        "Record(4, 40)",
+                        "Record(5, 50)");
     }
 
-    private Map<String, IcebergRef> getRefsFromSnapshot(FileStoreTable table, long snapshotId) {
+    private Map<String, IcebergRef> getIcebergRefsFromSnapshot(
+            FileStoreTable table, long snapshotId) {
         return IcebergMetadata.fromPath(
                         table.fileIO(),
                         new Path(table.location(), "metadata/v" + snapshotId + ".metadata.json"))
@@ -1114,6 +1314,114 @@ public class IcebergCompatibilityTest {
                 Record::toString);
     }
 
+    @Test
+    public void testIcebergAvroFieldIds() throws Exception {
+
+        RowType rowType =
+                RowType.of(
+                        new DataType[] {
+                            DataTypes.INT(), DataTypes.VARCHAR(20), DataTypes.VARCHAR(20)
+                        },
+                        new String[] {"k", "country", "day"});
+        FileStoreTable table =
+                createPaimonTable(
+                        rowType,
+                        Arrays.asList("country", "day"),
+                        Collections.singletonList("k"),
+                        -1);
+
+        String commitUser = UUID.randomUUID().toString();
+        TableWriteImpl<?> write = table.newWrite(commitUser);
+        TableCommitImpl commit = table.newCommit(commitUser);
+
+        write.write(
+                GenericRow.of(
+                        1, BinaryString.fromString("Switzerland"), BinaryString.fromString("June")),
+                1);
+        write.write(
+                GenericRow.of(
+                        2, BinaryString.fromString("Australia"), BinaryString.fromString("July")),
+                1);
+        write.write(
+                GenericRow.of(
+                        3, BinaryString.fromString("Brazil"), BinaryString.fromString("October")),
+                1);
+        write.write(
+                GenericRow.of(
+                        4,
+                        BinaryString.fromString("Grand Duchy of Luxembourg"),
+                        BinaryString.fromString("November")),
+                1);
+        commit.commit(1, write.prepareCommit(false, 1));
+        assertThat(getIcebergResult())
+                .containsExactlyInAnyOrder(
+                        "Record(1, Switzerland, June)",
+                        "Record(2, Australia, July)",
+                        "Record(3, Brazil, October)",
+                        "Record(4, Grand Duchy of Luxembourg, November)");
+
+        org.apache.iceberg.Table icebergTable = getIcebergTable();
+        String manifestListLocation = icebergTable.currentSnapshot().manifestListLocation();
+
+        Map<String, Integer> manifestListFieldIdsMap =
+                parseAvroSchemaFieldIds(manifestListLocation);
+        assertThat(manifestListFieldIdsMap)
+                .hasSize(19)
+                .containsEntry("manifest_file:r508:contains_null", 509)
+                .containsEntry("manifest_file:r508:contains_nan", 518)
+                .containsEntry("manifest_file:added_snapshot_id", 503)
+                .containsEntry("manifest_file:added_files_count", 504)
+                .containsEntry("manifest_file:deleted_rows_count", 514)
+                .containsEntry("manifest_file:added_rows_count", 512)
+                .containsEntry("manifest_file:manifest_length", 501)
+                .containsEntry("manifest_file:partition_spec_id", 502)
+                .containsEntry("manifest_file:deleted_files_count", 506)
+                .containsEntry("manifest_file:partitions", 507)
+                .containsEntry("manifest_file:existing_files_count", 505)
+                .containsEntry("manifest_file:r508:upper_bound", 511)
+                .containsEntry("manifest_file:sequence_number", 515)
+                .containsEntry("manifest_file:min_sequence_number", 516)
+                .containsEntry("manifest_file:r508:lower_bound", 510)
+                .containsEntry("manifest_file:manifest_path", 500)
+                .containsEntry("manifest_file:content", 517)
+                .containsEntry("manifest_file:existing_rows_count", 513)
+                .containsEntry("r508", 508);
+
+        String manifestPath =
+                icebergTable.currentSnapshot().allManifests(icebergTable.io()).get(0).path();
+        Map<String, Integer> manifestFieldIdsMap = parseAvroSchemaFieldIds(manifestPath);
+        assertThat(manifestFieldIdsMap)
+                .hasSize(28)
+                .containsEntry("manifest_entry:status", 0)
+                .containsEntry("manifest_entry:snapshot_id", 1)
+                .containsEntry("manifest_entry:data_file", 2)
+                .containsEntry("manifest_entry:sequence_number", 3)
+                .containsEntry("manifest_entry:file_sequence_number", 4)
+                .containsEntry("manifest_entry:r2:file_path", 100)
+                .containsEntry("manifest_entry:r2:file_format", 101)
+                .containsEntry("manifest_entry:r2:partition", 102)
+                .containsEntry("manifest_entry:r2:record_count", 103)
+                .containsEntry("manifest_entry:r2:file_size_in_bytes", 104)
+                .containsEntry("manifest_entry:r2:null_value_counts", 110)
+                .containsEntry("manifest_entry:r2:k121_v122:value", 122)
+                .containsEntry("manifest_entry:r2:k121_v122:key", 121)
+                .containsEntry("manifest_entry:r2:lower_bounds", 125)
+                .containsEntry("manifest_entry:r2:k126_v127:key", 126)
+                .containsEntry("manifest_entry:r2:k126_v127:value", 127)
+                .containsEntry("manifest_entry:r2:upper_bounds", 128)
+                .containsEntry("manifest_entry:r2:k129_v130:key", 129)
+                .containsEntry("manifest_entry:r2:k129_v130:value", 130)
+                .containsEntry("manifest_entry:r2:content", 134)
+                .containsEntry("manifest_entry:r2:referenced_data_file", 143)
+                .containsEntry("manifest_entry:r2:content_offset", 144)
+                .containsEntry("manifest_entry:r2:content_size_in_bytes", 145)
+                .containsEntry("manifest_entry:r2:r102:country", 1000)
+                .containsEntry("manifest_entry:r2:r102:day", 1001);
+
+        write.close();
+        commit.close();
+    }
+
     private void runCompatibilityTest(
             RowType rowType,
             List<String> partitionKeys,
@@ -1158,6 +1466,7 @@ public class IcebergCompatibilityTest {
     }
 
     private static class TestRecord {
+
         private final BinaryRow partition;
         private final GenericRow record;
 
@@ -1214,13 +1523,17 @@ public class IcebergCompatibilityTest {
                 icebergTable -> IcebergGenerics.read(icebergTable).build(), Record::toString);
     }
 
+    private org.apache.iceberg.Table getIcebergTable() {
+        HadoopCatalog icebergCatalog = new HadoopCatalog(new Configuration(), tempDir.toString());
+        TableIdentifier icebergIdentifier = TableIdentifier.of("mydb.db", "t");
+        return icebergCatalog.loadTable(icebergIdentifier);
+    }
+
     private List<String> getIcebergResult(
             Function<org.apache.iceberg.Table, CloseableIterable<Record>> query,
             Function<Record, String> icebergRecordToString)
             throws Exception {
-        HadoopCatalog icebergCatalog = new HadoopCatalog(new Configuration(), tempDir.toString());
-        TableIdentifier icebergIdentifier = TableIdentifier.of("mydb.db", "t");
-        org.apache.iceberg.Table icebergTable = icebergCatalog.loadTable(icebergIdentifier);
+        org.apache.iceberg.Table icebergTable = getIcebergTable();
         CloseableIterable<Record> result = query.apply(icebergTable);
         List<String> actual = new ArrayList<>();
         for (Record record : result) {
@@ -1228,5 +1541,44 @@ public class IcebergCompatibilityTest {
         }
         result.close();
         return actual;
+    }
+
+    private Map<String, Integer> parseAvroSchemaFieldIds(String avroPath) throws Exception {
+        Map<String, Integer> fieldIdMap = new HashMap<>();
+        try (DataFileReader<GenericRecord> dataFileReader =
+                new DataFileReader<>(
+                        new SeekableFileInput(new File(avroPath)), new GenericDatumReader<>())) {
+            org.apache.avro.Schema schema = dataFileReader.getSchema();
+            parseAvroFields(schema, fieldIdMap, schema.getName());
+        }
+        return fieldIdMap;
+    }
+
+    private void parseAvroFields(
+            org.apache.avro.Schema schema, Map<String, Integer> fieldIdMap, String rootName) {
+        for (Field field : schema.getFields()) {
+            Object fieldId = field.getObjectProp("field-id");
+            fieldIdMap.put(rootName + ":" + field.name(), (Integer) fieldId);
+
+            org.apache.avro.Schema fieldSchema = field.schema();
+            if (fieldSchema.getType() == org.apache.avro.Schema.Type.UNION) {
+                fieldSchema =
+                        fieldSchema.getTypes().stream()
+                                .filter(s -> s.getType() != Type.NULL)
+                                .findFirst()
+                                .get();
+            }
+            if (Objects.requireNonNull(fieldSchema.getType()) == Type.RECORD) {
+                parseAvroFields(fieldSchema, fieldIdMap, rootName + ":" + fieldSchema.getName());
+            } else if (fieldSchema.getType() == Type.ARRAY) {
+                org.apache.avro.Schema elementType = fieldSchema.getElementType();
+                Object elementId = fieldSchema.getObjectProp("element-id");
+                fieldIdMap.put(elementType.getName(), (Integer) elementId);
+                if (elementType.getType() == Type.RECORD) {
+                    parseAvroFields(
+                            elementType, fieldIdMap, rootName + ":" + elementType.getName());
+                }
+            }
+        }
     }
 }

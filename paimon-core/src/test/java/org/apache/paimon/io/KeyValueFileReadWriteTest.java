@@ -233,11 +233,12 @@ public class KeyValueFileReadWriteTest {
                         format,
                         CoreOptions.DATA_FILE_PREFIX.defaultValue(),
                         CoreOptions.CHANGELOG_FILE_PREFIX.defaultValue(),
-                        CoreOptions.PARTITION_GENERATE_LEGCY_NAME.defaultValue(),
+                        CoreOptions.PARTITION_GENERATE_LEGACY_NAME.defaultValue(),
                         CoreOptions.FILE_SUFFIX_INCLUDE_COMPRESSION.defaultValue(),
                         CoreOptions.FILE_COMPRESSION.defaultValue(),
                         null,
-                        null);
+                        null,
+                        false);
         int suggestedFileSize = ThreadLocalRandom.current().nextInt(8192) + 1024;
         FileIO fileIO = FileIOFinder.find(path);
         Options options = new Options();
@@ -254,11 +255,12 @@ public class KeyValueFileReadWriteTest {
                                 format,
                                 CoreOptions.DATA_FILE_PREFIX.defaultValue(),
                                 CoreOptions.CHANGELOG_FILE_PREFIX.defaultValue(),
-                                CoreOptions.PARTITION_GENERATE_LEGCY_NAME.defaultValue(),
+                                CoreOptions.PARTITION_GENERATE_LEGACY_NAME.defaultValue(),
                                 CoreOptions.FILE_SUFFIX_INCLUDE_COMPRESSION.defaultValue(),
                                 CoreOptions.FILE_COMPRESSION.defaultValue(),
                                 null,
-                                null);
+                                null,
+                                false);
                     }
                 };
 

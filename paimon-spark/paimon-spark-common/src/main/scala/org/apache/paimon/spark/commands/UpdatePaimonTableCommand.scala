@@ -19,7 +19,7 @@
 package org.apache.paimon.spark.commands
 
 import org.apache.paimon.spark.catalyst.analysis.AssignmentAlignmentHelper
-import org.apache.paimon.spark.leafnode.PaimonLeafRunnableCommand
+import org.apache.paimon.spark.schema.PaimonMetadataColumn.{ROW_ID_COLUMN, SEQUENCE_NUMBER_COLUMN}
 import org.apache.paimon.spark.schema.SparkSystemColumns.ROW_KIND_COL
 import org.apache.paimon.table.FileStoreTable
 import org.apache.paimon.table.sink.CommitMessage
@@ -28,19 +28,18 @@ import org.apache.paimon.types.RowKind
 
 import org.apache.spark.sql.{Row, SparkSession}
 import org.apache.spark.sql.PaimonUtils.createDataset
-import org.apache.spark.sql.catalyst.expressions.{Alias, Expression, If}
-import org.apache.spark.sql.catalyst.expressions.Literal.TrueLiteral
-import org.apache.spark.sql.catalyst.plans.logical.{Assignment, Filter, Project, SupportsSubquery}
+import org.apache.spark.sql.catalyst.expressions.{Alias, Expression, If, Literal}
+import org.apache.spark.sql.catalyst.expressions.Literal.{FalseLiteral, TrueLiteral}
+import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
-import org.apache.spark.sql.functions.lit
+import org.apache.spark.sql.functions.{col, lit}
 
 case class UpdatePaimonTableCommand(
     relation: DataSourceV2Relation,
     override val table: FileStoreTable,
     condition: Expression,
     assignments: Seq[Assignment])
-  extends PaimonLeafRunnableCommand
-  with PaimonCommand
+  extends PaimonRowLevelCommand
   with AssignmentAlignmentHelper
   with SupportsSubquery {
 
@@ -57,7 +56,7 @@ case class UpdatePaimonTableCommand(
     } else {
       performUpdateForNonPkTable(sparkSession)
     }
-    dvSafeWriter.commit(commitMessages)
+    writer.commit(commitMessages)
 
     Seq.empty[Row]
   }
@@ -67,7 +66,7 @@ case class UpdatePaimonTableCommand(
     val updatedPlan = Project(updateExpressions, Filter(condition, relation))
     val df = createDataset(sparkSession, updatedPlan)
       .withColumn(ROW_KIND_COL, lit(RowKind.UPDATE_AFTER.toByteValue))
-    dvSafeWriter.write(df)
+    writer.write(df)
   }
 
   /** Update for table without primary keys */
@@ -77,11 +76,12 @@ case class UpdatePaimonTableCommand(
     val dataFilePathToMeta = candidateFileMap(candidateDataSplits)
 
     if (candidateDataSplits.isEmpty) {
-      // no data spilt need to be rewrote
+      // no data spilt need to be rewritten
       logDebug("No file need to rewrote. It's an empty Commit.")
       Seq.empty[CommitMessage]
     } else {
       val pathFactory = fileStore.pathFactory()
+
       if (deletionVectorsEnabled) {
         // Step2: collect all the deletion vectors that marks the deleted rows.
         val deletionVectors = collectDeletionVectors(
@@ -100,7 +100,7 @@ case class UpdatePaimonTableCommand(
           val addCommitMessage = writeOnlyUpdatedData(sparkSession, touchedDataSplits)
 
           // Step4: write these deletion vectors.
-          val indexCommitMsg = dvSafeWriter.persistDeletionVectors(deletionVectors)
+          val indexCommitMsg = writer.persistDeletionVectors(deletionVectors)
 
           addCommitMessage ++ indexCommitMsg
         } finally {
@@ -113,12 +113,12 @@ case class UpdatePaimonTableCommand(
 
         // Step3: the smallest range of data files that need to be rewritten.
         val (touchedFiles, touchedFileRelation) =
-          createNewRelation(touchedFilePaths, dataFilePathToMeta, relation)
+          extractFilesAndCreateNewScan(touchedFilePaths, dataFilePathToMeta, relation)
 
         // Step4: build a dataframe that contains the unchanged and updated data, and write out them.
         val addCommitMessage = writeUpdatedAndUnchangedData(sparkSession, touchedFileRelation)
 
-        // Step5: convert the deleted files that need to be wrote to commit message.
+        // Step5: convert the deleted files that need to be written to commit message.
         val deletedCommitMessage = buildDeletedCommitMessage(touchedFiles)
 
         addCommitMessage ++ deletedCommitMessage
@@ -134,30 +134,46 @@ case class UpdatePaimonTableCommand(
         toColumn(update).as(origin.name, origin.metadata)
     }
 
-    val toUpdateScanRelation = createNewRelation(touchedDataSplits, relation)
-    val newPlan = if (condition == TrueLiteral) {
-      toUpdateScanRelation
-    } else {
-      Filter(condition, toUpdateScanRelation)
-    }
-    val data = createDataset(sparkSession, newPlan).select(updateColumns: _*)
-    dvSafeWriter.write(data)
+    val toUpdateScanRelation = createNewScanPlan(touchedDataSplits, relation, Some(condition))
+    val data = createDataset(sparkSession, toUpdateScanRelation).select(updateColumns: _*)
+    writer.write(data)
   }
 
   private def writeUpdatedAndUnchangedData(
       sparkSession: SparkSession,
-      toUpdateScanRelation: DataSourceV2Relation): Seq[CommitMessage] = {
-    val updateColumns = updateExpressions.zip(relation.output).map {
+      toUpdateScanRelation: LogicalPlan): Seq[CommitMessage] = {
+    var updateColumns = updateExpressions.zip(relation.output).map {
       case (update, origin) =>
-        val updated = if (condition == TrueLiteral) {
-          update
-        } else {
-          If(condition, update, origin)
-        }
+        val updated = optimizedIf(condition, update, origin)
         toColumn(updated).as(origin.name, origin.metadata)
     }
 
+    if (coreOptions.rowTrackingEnabled()) {
+      updateColumns ++= Seq(
+        col(ROW_ID_COLUMN),
+        toColumn(
+          optimizedIf(
+            condition,
+            Literal(null),
+            toExpression(sparkSession, col(SEQUENCE_NUMBER_COLUMN))))
+          .as(SEQUENCE_NUMBER_COLUMN)
+      )
+    }
+
     val data = createDataset(sparkSession, toUpdateScanRelation).select(updateColumns: _*)
-    dvSafeWriter.write(data)
+    writer.withRowLineage().write(data)
+  }
+
+  private def optimizedIf(
+      predicate: Expression,
+      trueValue: Expression,
+      falseValue: Expression): Expression = {
+    if (predicate == TrueLiteral) {
+      trueValue
+    } else if (predicate == FalseLiteral) {
+      falseValue
+    } else {
+      If(predicate, trueValue, falseValue)
+    }
   }
 }

@@ -167,7 +167,7 @@ public class IntervalPartitionTest {
         maxWriter.writeInt(0, right);
         maxWriter.complete();
 
-        return new DataFileMeta(
+        return DataFileMeta.create(
                 "DUMMY",
                 100,
                 25,
@@ -184,6 +184,8 @@ public class IntervalPartitionTest {
                 0L,
                 null,
                 FileSource.APPEND,
+                null,
+                null,
                 null,
                 null);
     }

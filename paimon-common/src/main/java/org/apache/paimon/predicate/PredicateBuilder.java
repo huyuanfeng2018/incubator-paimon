@@ -26,6 +26,7 @@ import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.DecimalType;
 import org.apache.paimon.types.RowType;
+import org.apache.paimon.utils.Pair;
 import org.apache.paimon.utils.Preconditions;
 
 import javax.annotation.Nullable;
@@ -205,6 +206,21 @@ public class PredicateBuilder {
         List<Predicate> result = new ArrayList<>();
         splitCompound(And.INSTANCE, predicate, result);
         return result;
+    }
+
+    public static Pair<List<Predicate>, List<Predicate>> splitAndByPartition(
+            Predicate predicate, int[] fieldIdxToPartitionIdx) {
+        List<Predicate> partitionFilters = new ArrayList<>();
+        List<Predicate> nonPartitionFilters = new ArrayList<>();
+        for (Predicate p : PredicateBuilder.splitAnd(predicate)) {
+            Optional<Predicate> mapped = transformFieldMapping(p, fieldIdxToPartitionIdx);
+            if (mapped.isPresent()) {
+                partitionFilters.add(mapped.get());
+            } else {
+                nonPartitionFilters.add(p);
+            }
+        }
+        return Pair.of(partitionFilters, nonPartitionFilters);
     }
 
     public static List<Predicate> splitOr(@Nullable Predicate predicate) {
@@ -418,5 +434,9 @@ public class PredicateBuilder {
                 partitions.stream()
                         .map(p -> PredicateBuilder.partition(p, rowType, defaultPartValue))
                         .toArray(Predicate[]::new));
+    }
+
+    public static int[] fieldIdxToPartitionIdx(RowType tableType, List<String> partitionKeys) {
+        return tableType.getFieldNames().stream().mapToInt(partitionKeys::indexOf).toArray();
     }
 }

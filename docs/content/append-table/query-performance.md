@@ -26,6 +26,26 @@ under the License.
 
 # Query Performance
 
+## Aggregate push down
+
+Append Table supports aggregate push down:
+
+```sql
+SELECT COUNT(*) FROM TABLE WHERE DT = '20230101';
+```
+
+This query can be accelerated during compilation and returns very quickly.
+
+For Spark SQL, table with default `metadata.stats-mode` can be accelerated:
+
+```sql
+SELECT MIN(a), MAX(b) FROM TABLE WHERE DT = '20230101';
+
+SELECT * FROM TABLE ORDER BY a LIMIT 1;
+```
+
+Min max topN query can be also accelerated during compilation and returns very quickly.
+
 ## Data Skipping By Order
 
 Paimon by default records the maximum and minimum values of each field in the manifest file.
@@ -42,14 +62,7 @@ You can take a look at [Flink COMPACT Action]({{< ref "maintenance/dedicated-com
 
 You can use file index too, it filters files by indexing on the reading side.
 
-```sql
-CREATE TABLE <PAIMON_TABLE> (<COLUMN> <COLUMN_TYPE> , ...) WITH (
-    'file-index.bloom-filter.columns' = 'c1,c2',
-    'file-index.bloom-filter.c1.items' = '200'
-);
-```
-
-Define `file-index.bloom-filter.columns`, Data file index is an external index file and Paimon will create its
+Define `file-index.bitmap.columns`, Data file index is an external index file and Paimon will create its
 corresponding index file for each file. If the index file is too small, it will be stored directly in the manifest,
 otherwise in the directory of the data file. Each data file corresponds to an index file, which has a separate file
 definition and can contain different types of indexes with multiple columns.
@@ -57,21 +70,33 @@ definition and can contain different types of indexes with multiple columns.
 Different file indexes may be efficient in different scenarios. For example bloom filter may speed up query in point lookup
 scenario. Using a bitmap may consume more space but can result in greater accuracy.
 
-`Bloom Filter`:
-* `file-index.bloom-filter.columns`: specify the columns that need bloom filter index.
-* `file-index.bloom-filter.<column_name>.fpp` to config false positive probability.
-* `file-index.bloom-filter.<column_name>.items` to config the expected distinct items in one data file.
-
-`Bitmap`:
-* `file-index.bitmap.columns`: specify the columns that need bitmap index. See [Index Bitmap]({{< ref "concepts/spec/fileindex#index-bitmap" >}}).
-
-`Bit-Slice Index Bitmap`
-* `file-index.bsi.columns`: specify the columns that need bsi index.
-
-More filter types will be supported...
+* [BloomFilter]({{< ref "concepts/spec/fileindex#index-bloomfilter" >}}): `file-index.bloom-filter.columns`.
+* [Bitmap]({{< ref "concepts/spec/fileindex#index-bitmap" >}}): `file-index.bitmap.columns`.
+* [Range Bitmap]({{< ref "concepts/spec/fileindex#index-range-bitmap" >}}): `file-index.range-bitmap.columns`.
 
 If you want to add file index to existing table, without any rewrite, you can use `rewrite_file_index` procedure. Before
 we use the procedure, you should config appropriate configurations in target table. You can use ALTER clause to config
 `file-index.<filter-type>.columns` to the table.
 
 How to invoke: see [flink procedures]({{< ref "flink/procedures#procedures" >}}) 
+
+## Bucketed Join
+
+Bucketed table can be used to avoid shuffle if necessary in batch query, for example, you can use the following Spark
+SQL to read a Paimon table:
+
+```sql
+SET spark.sql.sources.v2.bucketing.enabled = true;
+
+CREATE TABLE FACT_TABLE (order_id INT, f1 STRING) TBLPROPERTIES ('bucket'='10', 'bucket-key' = 'order_id');
+
+CREATE TABLE DIM_TABLE (order_id INT, f2 STRING) TBLPROPERTIES ('bucket'='10', 'primary-key' = 'order_id');
+
+SELECT * FROM FACT_TABLE JOIN DIM_TABLE on t1.order_id = t4.order_id;
+```
+
+The `spark.sql.sources.v2.bucketing.enabled` config is used to enable bucketing for V2 data sources. When turned on,
+Spark will recognize the specific distribution reported by a V2 data source through SupportsReportPartitioning, and
+will try to avoid shuffle if necessary.
+
+The costly join shuffle will be avoided if two tables have the same bucketing strategy and same number of buckets.

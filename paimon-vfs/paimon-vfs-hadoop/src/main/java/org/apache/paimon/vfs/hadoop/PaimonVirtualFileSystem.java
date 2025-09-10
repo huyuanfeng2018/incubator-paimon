@@ -18,6 +18,7 @@
 
 package org.apache.paimon.vfs.hadoop;
 
+import org.apache.paimon.annotation.VisibleForTesting;
 import org.apache.paimon.fs.PositionOutputStream;
 import org.apache.paimon.options.CatalogOptions;
 import org.apache.paimon.options.Options;
@@ -66,6 +67,9 @@ public class PaimonVirtualFileSystem extends FileSystem {
         super.initialize(uri, conf);
 
         this.workingDirectory = new Path(uri);
+        if (uri.getAuthority() == null || uri.getAuthority().isEmpty()) {
+            throw new IllegalArgumentException("URI authority is empty: " + uri);
+        }
         this.uri = URI.create(uri.getScheme() + "://" + uri.getAuthority() + "/");
 
         initVFSOperations();
@@ -73,8 +77,21 @@ public class PaimonVirtualFileSystem extends FileSystem {
 
     private void initVFSOperations() {
         Options options = PaimonVirtualFileSystemConfiguration.convertToCatalogOptions(conf);
-        // pvfs://catalog_name/database_name/table_name/file, so uri authority is catalog name
-        options.set(CatalogOptions.WAREHOUSE, uri.getAuthority());
+        String authority = uri.getAuthority();
+        int delimiterIndex = authority.indexOf(".");
+        if (delimiterIndex == 0 || delimiterIndex == authority.length() - 1) {
+            throw new IllegalArgumentException("Invalid URI authority: " + uri);
+        }
+        if (delimiterIndex < 0) {
+            // pvfs://catalog_name/database_name/table_name/file, so uri authority is catalog name
+            options.set(CatalogOptions.WAREHOUSE, authority);
+        } else {
+            // pvfs://catalog_name.endpoint/database_name/table_name/file
+            String catalogName = authority.substring(0, delimiterIndex);
+            String endpoint = authority.substring(delimiterIndex + 1);
+            options.set(CatalogOptions.WAREHOUSE, catalogName);
+            options.set(RESTCatalogOptions.URI, endpoint);
+        }
 
         // Set user agent
         options.set(RESTCatalogOptions.HTTP_USER_AGENT, USER_AGENT);
@@ -178,12 +195,12 @@ public class PaimonVirtualFileSystem extends FileSystem {
                     (VFSTableRootIdentifier) srcVfsIdentifier,
                     (VFSTableRootIdentifier) dstVfsIdentifier);
         } else {
-            if (!(dstVfsIdentifier instanceof VFSTableObjectIdentifier)) {
+            if (!(dstVfsIdentifier instanceof VFSTableIdentifier)) {
                 throw new IOException(
                         "Cannot rename to virtual path " + dst + " which is not a table");
             }
             VFSTableObjectIdentifier srcIdentifier = (VFSTableObjectIdentifier) srcVfsIdentifier;
-            VFSTableObjectIdentifier dstIdentifier = (VFSTableObjectIdentifier) dstVfsIdentifier;
+            VFSTableIdentifier dstIdentifier = (VFSTableIdentifier) dstVfsIdentifier;
             VFSTableInfo srcTableInfo = srcIdentifier.tableInfo();
             VFSTableInfo dstTableInfo = dstIdentifier.tableInfo();
             if (srcTableInfo == null) {
@@ -392,7 +409,16 @@ public class PaimonVirtualFileSystem extends FileSystem {
 
     @Override
     public boolean mkdirs(Path f, FsPermission permission) throws IOException {
-        VFSIdentifier vfsIdentifier = vfsOperations.getVFSIdentifier(getVirtualPath(f));
+        String virtualPath = getVirtualPath(f);
+        // Hadoop TrashPolicy will mkdir /user/<root>/.Trash, and we should reject this operation
+        // and return false, which indicates trash is not supported for TrashPolicy
+        for (String component : virtualPath.split("/")) {
+            if (component.equals(".Trash")) {
+                LOG.info("PVFS do not support trash directory {}", f);
+                return false;
+            }
+        }
+        VFSIdentifier vfsIdentifier = vfsOperations.getVFSIdentifier(virtualPath);
         if (vfsIdentifier instanceof VFSCatalogIdentifier) {
             throw new IOException("Cannot mkdirs for virtual path " + f + " which is a catalog");
         } else if (vfsIdentifier instanceof VFSDatabaseIdentifier) {
@@ -437,5 +463,10 @@ public class PaimonVirtualFileSystem extends FileSystem {
     @Override
     public Path getWorkingDirectory() {
         return workingDirectory;
+    }
+
+    @VisibleForTesting
+    public boolean isCacheEnabled() {
+        return vfsOperations.isCacheEnabled();
     }
 }

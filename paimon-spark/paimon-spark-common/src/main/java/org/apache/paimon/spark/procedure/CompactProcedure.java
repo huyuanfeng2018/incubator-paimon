@@ -29,14 +29,14 @@ import org.apache.paimon.manifest.PartitionEntry;
 import org.apache.paimon.operation.BaseAppendFileStoreWrite;
 import org.apache.paimon.partition.PartitionPredicate;
 import org.apache.paimon.predicate.Predicate;
-import org.apache.paimon.spark.PaimonSplitScan;
 import org.apache.paimon.spark.SparkUtils;
-import org.apache.paimon.spark.catalyst.Compatibility;
 import org.apache.paimon.spark.catalyst.analysis.expressions.ExpressionUtils;
 import org.apache.paimon.spark.commands.PaimonSparkWriter;
 import org.apache.paimon.spark.sort.TableSorter;
+import org.apache.paimon.spark.util.ScanPlanHelper$;
 import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.table.SpecialFields;
 import org.apache.paimon.table.sink.AppendCompactTaskSerializer;
 import org.apache.paimon.table.sink.BatchTableCommit;
 import org.apache.paimon.table.sink.BatchTableWrite;
@@ -421,6 +421,12 @@ public class CompactProcedure extends BaseProcedure {
                                             BaseAppendFileStoreWrite write =
                                                     (BaseAppendFileStoreWrite)
                                                             table.store().newWrite(commitUser);
+                                            CoreOptions coreOptions = table.coreOptions();
+                                            if (coreOptions.rowTrackingEnabled()) {
+                                                write.withWriteType(
+                                                        SpecialFields.rowTypeWithRowLineage(
+                                                                table.rowType()));
+                                            }
                                             AppendCompactTaskSerializer ser =
                                                     new AppendCompactTaskSerializer();
                                             List<byte[]> messages = new ArrayList<>();
@@ -501,16 +507,14 @@ public class CompactProcedure extends BaseProcedure {
                                     Dataset<Row> dataset =
                                             PaimonUtils.createDataset(
                                                     spark(),
-                                                    Compatibility.createDataSourceV2ScanRelation(
-                                                            relation,
-                                                            PaimonSplitScan.apply(table, split),
-                                                            relation.output()));
+                                                    ScanPlanHelper$.MODULE$.createNewScanPlan(
+                                                            split, relation));
                                     return sorter.sort(dataset);
                                 })
                         .reduce(Dataset::union)
                         .orElse(null);
         if (datasetForWrite != null) {
-            PaimonSparkWriter writer = new PaimonSparkWriter(table);
+            PaimonSparkWriter writer = PaimonSparkWriter.apply(table);
             // Use dynamic partition overwrite
             writer.writeBuilder().withOverwrite();
             writer.commit(writer.write(datasetForWrite));

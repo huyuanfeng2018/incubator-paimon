@@ -86,7 +86,7 @@ public class ChangelogCompactTaskSerializerTest {
     }
 
     private DataFileMeta newFile() {
-        return new DataFileMeta(
+        return DataFileMeta.create(
                 UUID.randomUUID().toString(),
                 0,
                 1,
@@ -101,6 +101,8 @@ public class ChangelogCompactTaskSerializerTest {
                 0L,
                 null,
                 FileSource.APPEND,
+                null,
+                null,
                 null);
     }
 }

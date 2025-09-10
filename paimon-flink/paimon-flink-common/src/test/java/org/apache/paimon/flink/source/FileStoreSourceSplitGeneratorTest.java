@@ -101,7 +101,7 @@ public class FileStoreSourceSplitGeneratorTest {
         List<DataFileMeta> metas = new ArrayList<>();
         for (String fileName : fileNames) {
             metas.add(
-                    new DataFileMeta(
+                    DataFileMeta.create(
                             fileName,
                             0, // not used
                             0, // not used
@@ -116,6 +116,8 @@ public class FileStoreSourceSplitGeneratorTest {
                             0L, // not used
                             null, // not used
                             FileSource.APPEND,
+                            null,
+                            null,
                             null));
         }
         return DataSplit.builder()

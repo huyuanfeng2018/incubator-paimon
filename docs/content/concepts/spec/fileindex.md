@@ -1,6 +1,6 @@
 ---
 title: "File Index"
-weight: 7
+weight: 8
 type: docs
 aliases:
 - /concepts/spec/fileindex.html
@@ -85,7 +85,10 @@ BODY:                             column index bytes + column index bytes + colu
 
 ## Index: BloomFilter 
 
-Define `'file-index.bloom-filter.columns'`.
+Options are:
+* `file-index.bloom-filter.columns`: specify the columns that need bloom filter index.
+* `file-index.bloom-filter.<column_name>.fpp` to config false positive probability.
+* `file-index.bloom-filter.<column_name>.items` to config the expected distinct items in one data file.
 
 Content of bloom filter index is simple: 
 - numHashFunctions 4 bytes int, BIG_ENDIAN
@@ -217,7 +220,139 @@ Integers are all BIG_ENDIAN.
 Bitmap only support the following data type: TinyIntType, SmallIntType, IntType, BigIntType, DateType, TimeType,
 LocalZonedTimestampType, TimestampType, CharType, VarCharType, StringType, BooleanType.
 
+## Index: Range Bitmap
+
+Advantage:
+1. Smaller than the bitmap index.
+2. Suitable for the point query and the range query in the high level of cardinality scenarios.
+3. Can be used to optimize the AND/OR predicates. (The corresponding columns need to have either bitmap index or range-bitmap index.)
+4. Can be used to optimize the topk/bottomk query. (Currently only suitable for append-only tables.)
+
+Shortcoming:
+1. The point query evaluation maybe slower than bitmap index.
+
+Options:
+* `file-index.range-bitmap.columns`: specify the columns that need range-bitmap index.
+* `file-index.range-bitmap.<column_name>.chunk-size`: to config the chunk size, default value is 16kb.
+
+Table supports using range-bitmap file index to optimize the `EQUALS`, `RANGE`, `AND/OR` and `TOPN` predicate. The bitmap and range-bitmap file index result will be merged and pushed down to the DataFile for filtering rowgroups and pages.
+
+In the following query examples, the `class_id` and the `score` has been created with range-bitmap file index. And the partition key `dt` is not necessary.
+
+**Optimize the `EQUALS` predicate:**
+```sql
+SELECT * FROM TABLE WHERE dt = '20250801' AND score = 100;
+
+SELECT * FROM TABLE WHERE dt = '20250801' AND score IN (60, 80);
+```
+
+**Optimize the `RANGE` predicate:**
+```sql
+SELECT * FROM TABLE WHERE dt = '20250801' AND score > 60;
+
+SELECT * FROM TABLE WHERE dt = '20250801' AND score < 60;
+```
+
+**Optimize the `AND/OR` predicate:**
+```sql
+SELECT * FROM TABLE WHERE dt = '20250801' AND class_id = 1 AND score < 60;
+
+SELECT * FROM TABLE WHERE dt = '20250801' AND class_id = 1 AND score < 60 OR score > 80;
+```
+
+**Optimize the `TOPN` predicate:**
+
+For now, the `TOPN` predicate optimization can not using with other predicates, only support in Apache Spark.
+```sql
+SELECT * FROM TABLE WHERE dt = '20250801' ORDER BY score ASC LIMIT 10;
+
+SELECT * FROM TABLE WHERE dt = '20250801' ORDER BY score DESC LIMIT 10;
+
+-- if there are multiple sort keys, the first sort key must be created with range-bitmap.
+SELECT * FROM TABLE WHERE dt = '20250801' ORDER BY score ASC, col DESC LIMIT 10;
+SELECT * FROM TABLE WHERE dt = '20250801' ORDER BY score DESC, col ASC LIMIT 10;
+```
+
+<pre>
+Range Bitmap file index format (V1)
++-------------------------------------------------+-----------------
+| header length (4 bytes int)                     |
++-------------------------------------------------+
+| version (1 byte)                                |
++-------------------------------------------------+
+| row number (4 bytes int)                        |
++-------------------------------------------------+
+| cardinality (4 bytes int)                       |       HEAD
++-------------------------------------------------+
+| min value                                       |
++-------------------------------------------------+
+| max value                                       |
++-------------------------------------------------+
+| dictionary length (4 bytes int)                 |
++-------------------------------------------------+-----------------
+| dictionary serialize in bytes                   |
++-------------------------------------------------+       BODY
+| bit-slice index bitmap serialize in bytes       |
++-------------------------------------------------+-----------------
+</pre>
+
+<pre>
+Dictionary format (V1)
++-------------------------------------------------+-----------------
+| header length (4 bytes int)                     |
++-------------------------------------------------+
+| version (1 byte)                                |
++-------------------------------------------------+
+| the chunks size (4 bytes int)                   |       HEAD
++-------------------------------------------------+    
+| the offsets length (4 bytes int)                |       
++-------------------------------------------------+
+| the chunks length (4 bytes int)                 |
++-------------------------------------------------+-----------------
+| offsets serialize in bytes                      |
++-------------------------------------------------+
+| chunks serialize in bytes                       |       BODY
++-------------------------------------------------+
+| keys serialize in bytes                         |
++-------------------------------------------------+-----------------
+</pre>
+
+<pre>
+Bit-slice index bitmap format (V1)
++-------------------------------------------------+-----------------
+| header length (4 bytes int)                     |
++-------------------------------------------------+
+| version (1 byte)                                |
++-------------------------------------------------+
+| slices size (4 bytes int)                       |       HEAD
++-------------------------------------------------+    
+| existence bitmap length (4 bytes int)           |       
++-------------------------------------------------+
+| indexes length (4 bytes int)                    |
++-------------------------------------------------+
+| indexes serialize in bytes                      |
++-------------------------------------------------+-----------------
+| existence bitmap serialize in bytes             |
++-------------------------------------------------+
+| the bit 0 bitmap serialize in bytes             |
++-------------------------------------------------+
+| the bit 1 bitmap serialize in byte              |       BODY
++-------------------------------------------------+
+| the bit 2 bitmap serialize in byte              |
++-------------------------------------------------+
+| ...                                             |
++-------------------------------------------------+-----------------
+</pre>
+
+RangeBitmap only support the following data type: TinyIntType, SmallIntType, IntType, BigIntType, DateType, TimeType, LocalZonedTimestampType, TimestampType, CharType, VarCharType, StringType, BooleanType, DoubleType, FloatType.
+
 ## Index: Bit-Slice Index Bitmap
+
+{{< hint warning >}}
+
+Deprecated. Using the range-bitmap index instead.
+
+{{< /hint >}}
 
 BSI file index is a numeric range index, used to accelerate range query, it can be used with bitmap index.
 

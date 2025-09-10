@@ -19,7 +19,7 @@
 package org.apache.paimon;
 
 import org.apache.paimon.data.InternalRow;
-import org.apache.paimon.deletionvectors.DeletionVectorsMaintainer;
+import org.apache.paimon.deletionvectors.BucketedDvMaintainer;
 import org.apache.paimon.format.FileFormatDiscover;
 import org.apache.paimon.fs.FileIO;
 import org.apache.paimon.operation.AppendFileStoreWrite;
@@ -27,12 +27,14 @@ import org.apache.paimon.operation.AppendOnlyFileStoreScan;
 import org.apache.paimon.operation.BaseAppendFileStoreWrite;
 import org.apache.paimon.operation.BucketSelectConverter;
 import org.apache.paimon.operation.BucketedAppendFileStoreWrite;
+import org.apache.paimon.operation.DataEvolutionSplitRead;
 import org.apache.paimon.operation.RawFileSplitRead;
 import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.schema.SchemaManager;
 import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.CatalogEnvironment;
+import org.apache.paimon.table.SpecialFields;
 import org.apache.paimon.types.RowType;
 
 import javax.annotation.Nullable;
@@ -80,7 +82,22 @@ public class AppendOnlyFileStore extends AbstractFileStore<InternalRow> {
                 rowType,
                 FileFormatDiscover.of(options),
                 pathFactory(),
-                options.fileIndexReadEnabled());
+                options.fileIndexReadEnabled(),
+                options.rowTrackingEnabled());
+    }
+
+    public DataEvolutionSplitRead newDataEvolutionRead() {
+        if (!options.dataEvolutionEnabled()) {
+            throw new IllegalStateException(
+                    "Field merge read is only supported when data-evolution.enabled is true.");
+        }
+        return new DataEvolutionSplitRead(
+                fileIO,
+                schemaManager,
+                schema,
+                rowType,
+                FileFormatDiscover.of(options),
+                pathFactory());
     }
 
     @Override
@@ -90,14 +107,14 @@ public class AppendOnlyFileStore extends AbstractFileStore<InternalRow> {
 
     @Override
     public BaseAppendFileStoreWrite newWrite(String commitUser, @Nullable Integer writeId) {
-        DeletionVectorsMaintainer.Factory dvMaintainerFactory =
-                options.deletionVectorsEnabled()
-                        ? DeletionVectorsMaintainer.factory(newIndexFileHandler())
-                        : null;
         if (bucketMode() == BucketMode.BUCKET_UNAWARE) {
+            RawFileSplitRead readForCompact = newRead();
+            if (options.rowTrackingEnabled()) {
+                readForCompact.withReadType(SpecialFields.rowTypeWithRowLineage(rowType));
+            }
             return new AppendFileStoreWrite(
                     fileIO,
-                    newRead(),
+                    readForCompact,
                     schema.id(),
                     rowType,
                     partitionType,
@@ -105,9 +122,12 @@ public class AppendOnlyFileStore extends AbstractFileStore<InternalRow> {
                     snapshotManager(),
                     newScan(),
                     options,
-                    dvMaintainerFactory,
                     tableName);
         } else {
+            BucketedDvMaintainer.Factory dvMaintainerFactory =
+                    options.deletionVectorsEnabled()
+                            ? BucketedDvMaintainer.factory(newIndexFileHandler())
+                            : null;
             return new BucketedAppendFileStoreWrite(
                     fileIO,
                     newRead(),
