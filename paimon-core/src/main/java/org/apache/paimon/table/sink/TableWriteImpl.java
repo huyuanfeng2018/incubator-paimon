@@ -27,7 +27,6 @@ import org.apache.paimon.disk.IOManager;
 import org.apache.paimon.io.BundleRecords;
 import org.apache.paimon.io.DataFileMeta;
 import org.apache.paimon.memory.MemoryPoolFactory;
-import org.apache.paimon.memory.MemorySegmentPool;
 import org.apache.paimon.metrics.MetricRegistry;
 import org.apache.paimon.operation.BundleFileStoreWriter;
 import org.apache.paimon.operation.FileStoreWrite;
@@ -38,6 +37,7 @@ import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.RowKind;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.Restorable;
+import org.apache.paimon.utils.RowKindFilter;
 
 import javax.annotation.Nullable;
 
@@ -59,7 +59,7 @@ public class TableWriteImpl<T> implements InnerTableWrite, Restorable<List<State
     private final KeyAndBucketExtractor<InternalRow> keyAndBucketExtractor;
     private final RecordExtractor<T> recordExtractor;
     @Nullable private final RowKindGenerator rowKindGenerator;
-    private final boolean ignoreDelete;
+    @Nullable private final RowKindFilter rowKindFilter;
 
     private boolean batchCommitted = false;
     private BucketMode bucketMode;
@@ -73,13 +73,13 @@ public class TableWriteImpl<T> implements InnerTableWrite, Restorable<List<State
             KeyAndBucketExtractor<InternalRow> keyAndBucketExtractor,
             RecordExtractor<T> recordExtractor,
             @Nullable RowKindGenerator rowKindGenerator,
-            boolean ignoreDelete) {
+            @Nullable RowKindFilter rowKindFilter) {
         this.rowType = rowType;
         this.write = write;
         this.keyAndBucketExtractor = keyAndBucketExtractor;
         this.recordExtractor = recordExtractor;
         this.rowKindGenerator = rowKindGenerator;
-        this.ignoreDelete = ignoreDelete;
+        this.rowKindFilter = rowKindFilter;
 
         List<String> notNullColumnNames =
                 rowType.getFields().stream()
@@ -119,11 +119,6 @@ public class TableWriteImpl<T> implements InnerTableWrite, Restorable<List<State
     }
 
     @Override
-    public TableWriteImpl<T> withMemoryPool(MemorySegmentPool memoryPool) {
-        write.withMemoryPool(memoryPool);
-        return this;
-    }
-
     public TableWriteImpl<T> withMemoryPoolFactory(MemoryPoolFactory memoryPoolFactory) {
         write.withMemoryPoolFactory(memoryPoolFactory);
         return this;
@@ -183,7 +178,7 @@ public class TableWriteImpl<T> implements InnerTableWrite, Restorable<List<State
         checkNullability(row);
         row = wrapDefaultValue(row);
         RowKind rowKind = RowKindGenerator.getRowKind(rowKindGenerator, row);
-        if (ignoreDelete && rowKind.isRetract()) {
+        if (rowKindFilter != null && !rowKindFilter.test(rowKind)) {
             return null;
         }
         SinkRecord record = bucket == -1 ? toSinkRecord(row) : toSinkRecord(row, bucket);

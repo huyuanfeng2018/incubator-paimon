@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import splitport, urlparse
 
 import pyarrow
+from packaging.version import parse
 from pyarrow._fs import FileSystem
 
 from pypaimon.common.config import OssOptions, S3Options
@@ -57,14 +58,21 @@ class FileIO:
 
     def _initialize_oss_fs(self) -> FileSystem:
         from pyarrow.fs import S3FileSystem
-        bucket_name = self.properties.get("prefix")
+
         client_kwargs = {
-            "endpoint_override": bucket_name + "." + self.properties.get(OssOptions.OSS_ENDPOINT),
             "access_key": self.properties.get(OssOptions.OSS_ACCESS_KEY_ID),
             "secret_key": self.properties.get(OssOptions.OSS_ACCESS_KEY_SECRET),
             "session_token": self.properties.get(OssOptions.OSS_SECURITY_TOKEN),
             "region": self.properties.get(OssOptions.OSS_REGION),
         }
+
+        # Based on https://github.com/apache/arrow/issues/40506
+        if parse(pyarrow.__version__) >= parse("7.0.0"):
+            client_kwargs['force_virtual_addressing'] = True
+            client_kwargs['endpoint_override'] = self.properties.get(OssOptions.OSS_ENDPOINT)
+        else:
+            client_kwargs['endpoint_override'] = (self.properties.get(OssOptions.OSS_BUCKET) + "." +
+                                                  self.properties.get(OssOptions.OSS_ENDPOINT))
 
         return S3FileSystem(**client_kwargs)
 
@@ -283,32 +291,30 @@ class FileIO:
 
         return None
 
-    def write_parquet(self, path: Path, data: pyarrow.RecordBatch, compression: str = 'snappy', **kwargs):
+    def write_parquet(self, path: Path, data: pyarrow.Table, compression: str = 'snappy', **kwargs):
         try:
             import pyarrow.parquet as pq
-            table = pyarrow.Table.from_batches([data])
 
             with self.new_output_stream(path) as output_stream:
-                pq.write_table(table, output_stream, compression=compression, **kwargs)
+                pq.write_table(data, output_stream, compression=compression, **kwargs)
 
         except Exception as e:
             self.delete_quietly(path)
             raise RuntimeError(f"Failed to write Parquet file {path}: {e}") from e
 
-    def write_orc(self, path: Path, data: pyarrow.RecordBatch, compression: str = 'zstd', **kwargs):
+    def write_orc(self, path: Path, data: pyarrow.Table, compression: str = 'zstd', **kwargs):
         try:
             """Write ORC file using PyArrow ORC writer."""
             import sys
             import pyarrow.orc as orc
-            table = pyarrow.Table.from_batches([data])
 
             with self.new_output_stream(path) as output_stream:
                 # Check Python version - if 3.6, don't use compression parameter
                 if sys.version_info[:2] == (3, 6):
-                    orc.write_table(table, output_stream, **kwargs)
+                    orc.write_table(data, output_stream, **kwargs)
                 else:
                     orc.write_table(
-                        table,
+                        data,
                         output_stream,
                         compression=compression,
                         **kwargs
@@ -318,7 +324,7 @@ class FileIO:
             self.delete_quietly(path)
             raise RuntimeError(f"Failed to write ORC file {path}: {e}") from e
 
-    def write_avro(self, path: Path, data: pyarrow.RecordBatch, avro_schema: Optional[Dict[str, Any]] = None, **kwargs):
+    def write_avro(self, path: Path, data: pyarrow.Table, avro_schema: Optional[Dict[str, Any]] = None, **kwargs):
         import fastavro
         if avro_schema is None:
             from pypaimon.schema.data_types import PyarrowFieldParser

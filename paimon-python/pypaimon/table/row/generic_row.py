@@ -18,7 +18,7 @@
 
 import struct
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any, List
 
@@ -27,7 +27,7 @@ from pypaimon.table.row.row_kind import RowKind
 
 
 @dataclass
-class BinaryRow:
+class GenericRow:
     values: List[Any]
     fields: List[DataField]
     row_kind: RowKind = RowKind.INSERT
@@ -36,7 +36,7 @@ class BinaryRow:
         return {self.fields[i].name: self.values[i] for i in range(len(self.fields))}
 
 
-class BinaryRowDeserializer:
+class GenericRowDeserializer:
     HEADER_SIZE_IN_BITS = 8
     MAX_FIX_PART_DATA_SIZE = 7
     HIGHEST_FIRST_BIT = 0x80 << 56
@@ -47,16 +47,14 @@ class BinaryRowDeserializer:
             cls,
             bytes_data: bytes,
             data_fields: List[DataField]
-    ) -> BinaryRow:
+    ) -> GenericRow:
         if not bytes_data:
-            return BinaryRow([], data_fields)
+            return GenericRow([], data_fields)
 
         arity = len(data_fields)
         actual_data = bytes_data
         if len(bytes_data) >= 4:
-            arity_from_bytes = struct.unpack('>i', bytes_data[:4])[0]
-            if 0 < arity_from_bytes < 1000:
-                actual_data = bytes_data[4:]
+            actual_data = bytes_data[4:]
 
         fields = []
         null_bits_size_in_bytes = cls._calculate_bit_set_width_in_bytes(arity)
@@ -66,7 +64,7 @@ class BinaryRowDeserializer:
                 value = cls._parse_field_value(actual_data, 0, null_bits_size_in_bytes, i, data_field.type)
             fields.append(value)
 
-        return BinaryRow(fields, data_fields, RowKind(actual_data[0]))
+        return GenericRow(fields, data_fields, RowKind(actual_data[0]))
 
     @classmethod
     def _calculate_bit_set_width_in_bytes(cls, arity: int) -> int:
@@ -109,17 +107,17 @@ class BinaryRowDeserializer:
             return cls._parse_float(bytes_data, field_offset)
         elif type_name in ['DOUBLE']:
             return cls._parse_double(bytes_data, field_offset)
-        elif type_name in ['VARCHAR', 'STRING', 'CHAR']:
+        elif type_name.startswith('CHAR') or type_name.startswith('VARCHAR') or type_name == 'STRING':
             return cls._parse_string(bytes_data, base_offset, field_offset)
-        elif type_name in ['BINARY', 'VARBINARY', 'BYTES']:
+        elif type_name.startswith('BINARY') or type_name.startswith('VARBINARY') or type_name == 'BYTES':
             return cls._parse_binary(bytes_data, base_offset, field_offset)
-        elif type_name in ['DECIMAL', 'NUMERIC']:
+        elif type_name.startswith('DECIMAL') or type_name.startswith('NUMERIC'):
             return cls._parse_decimal(bytes_data, base_offset, field_offset, data_type)
-        elif type_name in ['TIMESTAMP', 'TIMESTAMP_WITHOUT_TIME_ZONE']:
+        elif type_name.startswith('TIMESTAMP'):
             return cls._parse_timestamp(bytes_data, base_offset, field_offset, data_type)
         elif type_name in ['DATE']:
             return cls._parse_date(bytes_data, field_offset)
-        elif type_name in ['TIME', 'TIME_WITHOUT_TIME_ZONE']:
+        elif type_name.startswith('TIME'):
             return cls._parse_time(bytes_data, field_offset)
         else:
             return cls._parse_string(bytes_data, base_offset, field_offset)
@@ -215,19 +213,19 @@ class BinaryRowDeserializer:
     @classmethod
     def _parse_timestamp(cls, bytes_data: bytes, base_offset: int, field_offset: int, data_type: DataType) -> datetime:
         millis = struct.unpack('<q', bytes_data[field_offset:field_offset + 8])[0]
-        return datetime.fromtimestamp(millis / 1000.0, tz=timezone.utc)
+        return datetime.fromtimestamp(millis / 1000.0, tz=None)
 
     @classmethod
-    def _parse_date(cls, bytes_data: bytes, field_offset: int) -> datetime:
+    def _parse_date(cls, bytes_data: bytes, field_offset: int) -> date:
         days = struct.unpack('<i', bytes_data[field_offset:field_offset + 4])[0]
-        return datetime(1970, 1, 1) + timedelta(days=days)
+        return date(1970, 1, 1) + timedelta(days=days)
 
     @classmethod
-    def _parse_time(cls, bytes_data: bytes, field_offset: int) -> datetime:
+    def _parse_time(cls, bytes_data: bytes, field_offset: int) -> time:
         millis = struct.unpack('<i', bytes_data[field_offset:field_offset + 4])[0]
         seconds = millis // 1000
         microseconds = (millis % 1000) * 1000
-        return datetime(1970, 1, 1).replace(
+        return time(
             hour=seconds // 3600,
             minute=(seconds % 3600) // 60,
             second=seconds % 60,
@@ -235,12 +233,12 @@ class BinaryRowDeserializer:
         )
 
 
-class BinaryRowSerializer:
+class GenericRowSerializer:
     HEADER_SIZE_IN_BITS = 8
     MAX_FIX_PART_DATA_SIZE = 7
 
     @classmethod
-    def to_bytes(cls, binary_row: BinaryRow) -> bytes:
+    def to_bytes(cls, binary_row: GenericRow) -> bytes:
         arity = len(binary_row.fields)
         null_bits_size_in_bytes = cls._calculate_bit_set_width_in_bytes(arity)
         fixed_part_size = null_bits_size_in_bytes + arity * 8
@@ -262,8 +260,8 @@ class BinaryRowSerializer:
                 raise ValueError(f"BinaryRow only support AtomicType yet, meet {field.type.__class__}")
 
             type_name = field.type.type.upper()
-            if type_name in ['VARCHAR', 'STRING', 'CHAR', 'BINARY', 'VARBINARY', 'BYTES']:
-                if type_name in ['VARCHAR', 'STRING', 'CHAR']:
+            if any(type_name.startswith(p) for p in ['CHAR', 'VARCHAR', 'STRING', 'BINARY', 'VARBINARY', 'BYTES']):
+                if any(type_name.startswith(p) for p in ['CHAR', 'VARCHAR', 'STRING']):
                     value_bytes = str(value).encode('utf-8')
                 else:
                     value_bytes = bytes(value)
@@ -322,13 +320,13 @@ class BinaryRowSerializer:
             return cls._serialize_float(value) + b'\x00' * 4
         elif type_name in ['DOUBLE']:
             return cls._serialize_double(value)
-        elif type_name in ['DECIMAL', 'NUMERIC']:
+        elif type_name.startswith('DECIMAL') or type_name.startswith('NUMERIC'):
             return cls._serialize_decimal(value, data_type)
-        elif type_name in ['TIMESTAMP', 'TIMESTAMP_WITHOUT_TIME_ZONE']:
+        elif type_name.startswith('TIMESTAMP'):
             return cls._serialize_timestamp(value)
         elif type_name in ['DATE']:
             return cls._serialize_date(value) + b'\x00' * 4
-        elif type_name in ['TIME', 'TIME_WITHOUT_TIME_ZONE']:
+        elif type_name.startswith('TIME'):
             return cls._serialize_time(value) + b'\x00' * 4
         else:
             raise TypeError(f"Unsupported type for serialization: {type_name}")
@@ -381,27 +379,26 @@ class BinaryRowSerializer:
 
     @classmethod
     def _serialize_timestamp(cls, value: datetime) -> bytes:
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
+        if value.tzinfo is not None:
+            raise RuntimeError("datetime tzinfo not supported yet")
         millis = int(value.timestamp() * 1000)
         return struct.pack('<q', millis)
 
     @classmethod
-    def _serialize_date(cls, value: datetime) -> bytes:
-        if isinstance(value, datetime):
+    def _serialize_date(cls, value: date) -> bytes:
+        if isinstance(value, date):
             epoch = datetime(1970, 1, 1).date()
-            days = (value.date() - epoch).days
+            days = (value - epoch).days
         else:
-            raise RuntimeError("date should be datatime")
+            raise RuntimeError("value should be datatime.date")
         return struct.pack('<i', days)
 
     @classmethod
-    def _serialize_time(cls, value: datetime) -> bytes:
-        if isinstance(value, datetime):
-            midnight = value.replace(hour=0, minute=0, second=0, microsecond=0)
-            millis = int((value - midnight).total_seconds() * 1000)
-        else:
+    def _serialize_time(cls, value: time) -> bytes:
+        if isinstance(value, time):
             millis = value.hour * 3600000 + value.minute * 60000 + value.second * 1000 + value.microsecond // 1000
+        else:
+            raise RuntimeError("value should be datatime.time")
         return struct.pack('<i', millis)
 
     @classmethod

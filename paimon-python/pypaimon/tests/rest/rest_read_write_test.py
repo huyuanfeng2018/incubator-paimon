@@ -15,27 +15,22 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
+
 import logging
 
 import pandas as pd
 import pyarrow as pa
-from pypaimon.schema.data_types import DataField, AtomicType
-
-from pypaimon.table.row.row_kind import RowKind
-
-from pypaimon.table.row.binary_row import BinaryRow, BinaryRowSerializer, BinaryRowDeserializer
 
 from pypaimon.api.options import Options
 from pypaimon.catalog.catalog_context import CatalogContext
-from pypaimon.catalog.catalog_factory import CatalogFactory
+from pypaimon import CatalogFactory
 from pypaimon.catalog.rest.rest_catalog import RESTCatalog
 from pypaimon.common.identifier import Identifier
-from pypaimon.schema.schema import Schema
-from pypaimon.tests.py36.pyarrow_compat import table_sort_by
-from pypaimon.tests.rest_catalog_base_test import RESTCatalogBaseTest
+from pypaimon import Schema
+from pypaimon.tests.rest.rest_base_test import RESTBaseTest
 
 
-class RESTTableReadWritePy36Test(RESTCatalogBaseTest):
+class RESTTableReadWriteTest(RESTBaseTest):
 
     def test_overwrite(self):
         simple_pa_schema = pa.schema([
@@ -118,37 +113,37 @@ class RESTTableReadWritePy36Test(RESTCatalogBaseTest):
         pd.testing.assert_frame_equal(
             actual_df2.reset_index(drop=True), df2.reset_index(drop=True))
 
-    def testParquetAppendOnlyReader(self):
+    def test_parquet_ao_reader(self):
         schema = Schema.from_pyarrow_schema(self.pa_schema, partition_keys=['dt'])
         self.rest_catalog.create_table('default.test_append_only_parquet', schema, False)
         table = self.rest_catalog.get_table('default.test_append_only_parquet')
         self._write_test_table(table)
 
         read_builder = table.new_read_builder()
-        actual = table_sort_by(self._read_test_table(read_builder), 'user_id')
+        actual = self._read_test_table(read_builder).sort_by('user_id')
         self.assertEqual(actual, self.expected)
 
-    def testOrcAppendOnlyReader(self):
+    def test_orc_ao_reader(self):
         schema = Schema.from_pyarrow_schema(self.pa_schema, partition_keys=['dt'], options={'file.format': 'orc'})
         self.rest_catalog.create_table('default.test_append_only_orc', schema, False)
         table = self.rest_catalog.get_table('default.test_append_only_orc')
         self._write_test_table(table)
 
         read_builder = table.new_read_builder()
-        actual = table_sort_by(self._read_test_table(read_builder), 'user_id')
+        actual = self._read_test_table(read_builder).sort_by('user_id')
         self.assertEqual(actual, self.expected)
 
-    def testAvroAppendOnlyReader(self):
+    def test_avro_ao_reader(self):
         schema = Schema.from_pyarrow_schema(self.pa_schema, partition_keys=['dt'], options={'file.format': 'avro'})
         self.rest_catalog.create_table('default.test_append_only_avro', schema, False)
         table = self.rest_catalog.get_table('default.test_append_only_avro')
         self._write_test_table(table)
 
         read_builder = table.new_read_builder()
-        actual = table_sort_by(self._read_test_table(read_builder), 'user_id')
+        actual = self._read_test_table(read_builder).sort_by('user_id')
         self.assertEqual(actual, self.expected)
 
-    def testAppendOnlyReaderWithFilter(self):
+    def test_ao_reader_with_filter(self):
         schema = Schema.from_pyarrow_schema(self.pa_schema, partition_keys=['dt'])
         self.rest_catalog.create_table('default.test_append_only_filter', schema, False)
         table = self.rest_catalog.get_table('default.test_append_only_filter')
@@ -167,20 +162,25 @@ class RESTTableReadWritePy36Test(RESTCatalogBaseTest):
         expected = pa.concat_tables([
             self.expected.slice(5, 1)  # 6/f
         ])
-        self.assertEqual(table_sort_by(actual, 'user_id'), expected)
+        self.assertEqual(actual.sort_by('user_id'), expected)
 
         p7 = predicate_builder.startswith('behavior', 'a')
-        p8 = predicate_builder.equal('item_id', 1002)
-        p9 = predicate_builder.is_null('behavior')
-        g2 = predicate_builder.or_predicates([p7, p8, p9])
+        p10 = predicate_builder.equal('item_id', 1002)
+        p11 = predicate_builder.is_null('behavior')
+        p9 = predicate_builder.contains('behavior', 'f')
+        p8 = predicate_builder.endswith('dt', 'p2')
+        g2 = predicate_builder.or_predicates([p7, p8, p9, p10, p11])
         read_builder = table.new_read_builder().with_filter(g2)
         actual = self._read_test_table(read_builder)
+        self.assertEqual(actual.sort_by('user_id'), self.expected)
+
+        g3 = predicate_builder.and_predicates([g1, g2])
+        read_builder = table.new_read_builder().with_filter(g3)
+        actual = self._read_test_table(read_builder)
         expected = pa.concat_tables([
-            self.expected.slice(0, 1),  # 1/a
-            self.expected.slice(1, 1),  # 2/b
-            self.expected.slice(3, 1),  # 5/e
+            self.expected.slice(5, 1)  # 6/f
         ])
-        self.assertEqual(table_sort_by(actual, 'user_id'), expected)
+        self.assertEqual(actual.sort_by('user_id'), expected)
 
         # Same as java, 'not_equal' will also filter records of 'None' value
         p12 = predicate_builder.not_equal('behavior', 'f')
@@ -195,31 +195,31 @@ class RESTTableReadWritePy36Test(RESTCatalogBaseTest):
             self.expected.slice(6, 1),  # 7/g
             self.expected.slice(7, 1),  # 8/h
         ])
-        self.assertEqual(table_sort_by(actual, 'user_id'), expected)
+        self.assertEqual(actual.sort_by('user_id'), expected)
 
-    def testAppendOnlyReaderWithProjection(self):
+    def test_ao_reader_with_projection(self):
         schema = Schema.from_pyarrow_schema(self.pa_schema, partition_keys=['dt'])
         self.rest_catalog.create_table('default.test_append_only_projection', schema, False)
         table = self.rest_catalog.get_table('default.test_append_only_projection')
         self._write_test_table(table)
 
         read_builder = table.new_read_builder().with_projection(['dt', 'user_id'])
-        actual = table_sort_by(self._read_test_table(read_builder), 'user_id')
+        actual = self._read_test_table(read_builder).sort_by('user_id')
         expected = self.expected.select(['dt', 'user_id'])
         self.assertEqual(actual, expected)
 
-    def testAvroAppendOnlyReaderWithProjection(self):
+    def test_avro_ao_reader_with_projection(self):
         schema = Schema.from_pyarrow_schema(self.pa_schema, partition_keys=['dt'], options={'file.format': 'avro'})
         self.rest_catalog.create_table('default.test_avro_append_only_projection', schema, False)
         table = self.rest_catalog.get_table('default.test_avro_append_only_projection')
         self._write_test_table(table)
 
         read_builder = table.new_read_builder().with_projection(['dt', 'user_id'])
-        actual = table_sort_by(self._read_test_table(read_builder), 'user_id')
+        actual = self._read_test_table(read_builder).sort_by('user_id')
         expected = self.expected.select(['dt', 'user_id'])
         self.assertEqual(actual, expected)
 
-    def testAppendOnlyReaderWithLimit(self):
+    def test_ao_reader_with_limit(self):
         schema = Schema.from_pyarrow_schema(self.pa_schema, partition_keys=['dt'])
         self.rest_catalog.create_table('default.test_append_only_limit', schema, False)
         table = self.rest_catalog.get_table('default.test_append_only_limit')
@@ -231,7 +231,93 @@ class RESTTableReadWritePy36Test(RESTCatalogBaseTest):
         # might be split of "dt=1" or split of "dt=2"
         self.assertEqual(actual.num_rows, 4)
 
-    def testWriteWrongSchema(self):
+    def test_pk_parquet_reader(self):
+        schema = Schema.from_pyarrow_schema(self.pa_schema,
+                                            partition_keys=['dt'],
+                                            primary_keys=['user_id', 'dt'],
+                                            options={'bucket': '2'})
+        self.rest_catalog.create_table('default.test_pk_parquet', schema, False)
+        table = self.rest_catalog.get_table('default.test_pk_parquet')
+        self._write_test_table(table)
+
+        read_builder = table.new_read_builder()
+        actual = self._read_test_table(read_builder).sort_by('user_id')
+        self.assertEqual(actual, self.expected)
+
+    def test_pk_orc_reader(self):
+        schema = Schema.from_pyarrow_schema(self.pa_schema,
+                                            partition_keys=['dt'],
+                                            primary_keys=['user_id', 'dt'],
+                                            options={
+                                                'bucket': '1',
+                                                'file.format': 'orc'
+                                            })
+        self.rest_catalog.create_table('default.test_pk_orc', schema, False)
+        table = self.rest_catalog.get_table('default.test_pk_orc')
+        self._write_test_table(table)
+
+        read_builder = table.new_read_builder()
+        actual: pa.Table = self._read_test_table(read_builder).sort_by('user_id')
+
+        # when bucket=1, actual field name will contain 'not null', so skip comparing field name
+        for i in range(len(actual.columns)):
+            col_a = actual.column(i)
+            col_b = self.expected.column(i)
+            self.assertEqual(col_a, col_b)
+
+    def test_pk_avro_reader(self):
+        schema = Schema.from_pyarrow_schema(self.pa_schema,
+                                            partition_keys=['dt'],
+                                            primary_keys=['user_id', 'dt'],
+                                            options={
+                                                'bucket': '2',
+                                                'file.format': 'avro'
+                                            })
+        self.rest_catalog.create_table('default.test_pk_avro', schema, False)
+        table = self.rest_catalog.get_table('default.test_pk_avro')
+        self._write_test_table(table)
+
+        read_builder = table.new_read_builder()
+        actual = self._read_test_table(read_builder).sort_by('user_id')
+        self.assertEqual(actual, self.expected)
+
+    def test_pk_reader_with_filter(self):
+        schema = Schema.from_pyarrow_schema(self.pa_schema,
+                                            partition_keys=['dt'],
+                                            primary_keys=['user_id', 'dt'],
+                                            options={'bucket': '2'})
+        self.rest_catalog.create_table('default.test_pk_filter', schema, False)
+        table = self.rest_catalog.get_table('default.test_pk_filter')
+        self._write_test_table(table)
+
+        predicate_builder = table.new_read_builder().new_predicate_builder()
+        p1 = predicate_builder.is_in('dt', ['p1'])
+        p2 = predicate_builder.between('user_id', 2, 7)
+        p3 = predicate_builder.is_not_null('behavior')
+        g1 = predicate_builder.and_predicates([p1, p2, p3])
+        read_builder = table.new_read_builder().with_filter(g1)
+        actual = self._read_test_table(read_builder).sort_by('user_id')
+        expected = pa.concat_tables([
+            self.expected.slice(1, 1),  # 2/b
+            self.expected.slice(5, 1)  # 7/g
+        ])
+        self.assertEqual(actual, expected)
+
+    def test_pk_reader_with_projection(self):
+        schema = Schema.from_pyarrow_schema(self.pa_schema,
+                                            partition_keys=['dt'],
+                                            primary_keys=['user_id', 'dt'],
+                                            options={'bucket': '2'})
+        self.rest_catalog.create_table('default.test_pk_projection', schema, False)
+        table = self.rest_catalog.get_table('default.test_pk_projection')
+        self._write_test_table(table)
+
+        read_builder = table.new_read_builder().with_projection(['dt', 'user_id', 'behavior'])
+        actual = self._read_test_table(read_builder).sort_by('user_id')
+        expected = self.expected.select(['dt', 'user_id', 'behavior'])
+        self.assertEqual(actual, expected)
+
+    def test_write_wrong_schema(self):
         self.rest_catalog.create_table('default.test_wrong_schema',
                                        Schema.from_pyarrow_schema(self.pa_schema),
                                        False)
@@ -255,7 +341,28 @@ class RESTTableReadWritePy36Test(RESTCatalogBaseTest):
             table_write.write_arrow_batch(record_batch)
         self.assertTrue(str(e.exception).startswith("Input schema isn't consistent with table schema."))
 
-    def testWriteWideTableLargeData(self):
+    def test_reader_iterator(self):
+        read_builder = self.table.new_read_builder()
+        table_read = read_builder.new_read()
+        splits = read_builder.new_scan().plan().splits()
+        iterator = table_read.to_iterator(splits)
+        result = []
+        value = next(iterator, None)
+        while value is not None:
+            result.append(value.get_field(1))
+            value = next(iterator, None)
+        self.assertEqual(result, [1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008])
+
+    def test_reader_duckdb(self):
+        read_builder = self.table.new_read_builder()
+        table_read = read_builder.new_read()
+        splits = read_builder.new_scan().plan().splits()
+        duckdb_con = table_read.to_duckdb(splits, 'duckdb_table')
+        actual = duckdb_con.query("SELECT * FROM duckdb_table").fetchdf()
+        expect = pd.DataFrame(self.raw_data)
+        pd.testing.assert_frame_equal(actual.reset_index(drop=True), expect.reset_index(drop=True))
+
+    def test_write_wide_table_large_data(self):
         logging.basicConfig(level=logging.INFO)
         catalog = CatalogFactory.create(self.options)
 
@@ -369,28 +476,3 @@ class RESTTableReadWritePy36Test(RESTCatalogBaseTest):
         table_read = read_builder.new_read()
         splits = read_builder.new_scan().plan().splits()
         self.assertEqual(table_read.to_arrow(splits).num_rows, total_rows)
-
-    def test_to_bytes_with_long_string(self):
-        """Test serialization of strings longer than 7 bytes which require variable part storage."""
-        # Create fields with a long string value
-        fields = [
-            DataField(0, "long_string", AtomicType("STRING")),
-        ]
-
-        # String longer than 7 bytes will be stored in variable part
-        long_string = "This is a long string that exceeds 7 bytes"
-        values = [long_string]
-
-        binary_row = BinaryRow(values, fields, RowKind.INSERT)
-        serialized_bytes = BinaryRowSerializer.to_bytes(binary_row)
-
-        # Verify the last 6 bytes are 0
-        # This is because the variable part data is rounded to the nearest word (8 bytes)
-        # The last 6 bytes check is to ensure proper padding
-        self.assertEqual(serialized_bytes[-6:], b'\x00\x00\x00\x00\x00\x00')
-        self.assertEqual(serialized_bytes[20:62].decode('utf-8'), long_string)
-        # Deserialize to verify
-        deserialized_row = BinaryRowDeserializer.from_bytes(serialized_bytes, fields)
-
-        self.assertEqual(deserialized_row.values[0], long_string)
-        self.assertEqual(deserialized_row.row_kind, RowKind.INSERT)
