@@ -154,13 +154,13 @@ public class FileDeletionTest {
         FileStoreCommitImpl commit = store.newCommit();
         Map<String, String> partitionSpec = new HashMap<>();
         partitionSpec.put("dt", "0401");
-        commit.overwrite(
+        commit.overwritePartition(
                 partitionSpec, new ManifestCommittable(commitIdentifier++), Collections.emptyMap());
 
         // step 3: generate snapshot 3 by cleaning partition dt=0402/hr=10
         partitionSpec.put("dt", "0402");
         partitionSpec.put("hr", "8");
-        commit.overwrite(
+        commit.overwritePartition(
                 partitionSpec, new ManifestCommittable(commitIdentifier++), Collections.emptyMap());
         commit.close();
 
@@ -751,7 +751,7 @@ public class FileDeletionTest {
                         store.newStatsFileHandler(),
                         store.options().changelogProducer() != CoreOptions.ChangelogProducer.NONE,
                         store.options().cleanEmptyDirectories(),
-                        store.options().deleteFileThreadNum());
+                        store.options().fileOperationThreadNum());
 
         ExpireSnapshots expireSnapshots =
                 new ExpireSnapshotsImpl(
@@ -816,7 +816,7 @@ public class FileDeletionTest {
                         store.newStatsFileHandler(),
                         store.options().changelogProducer() != CoreOptions.ChangelogProducer.NONE,
                         store.options().cleanEmptyDirectories(),
-                        store.options().deleteFileThreadNum());
+                        store.options().fileOperationThreadNum());
         ExpireSnapshots expireSnapshots =
                 new ExpireSnapshotsImpl(
                         snapshotManager, changelogManager, snapshotDeletion, tagManager);
