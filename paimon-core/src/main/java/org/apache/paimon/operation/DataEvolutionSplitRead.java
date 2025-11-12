@@ -40,13 +40,14 @@ import org.apache.paimon.reader.RecordReader;
 import org.apache.paimon.schema.SchemaManager;
 import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.table.SpecialFields;
-import org.apache.paimon.table.source.DataEvolutionSplitGenerator;
 import org.apache.paimon.table.source.DataSplit;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.FileStorePathFactory;
 import org.apache.paimon.utils.FormatReaderMapping;
 import org.apache.paimon.utils.FormatReaderMapping.Builder;
+import org.apache.paimon.utils.RangeHelper;
+import org.apache.paimon.utils.RoaringBitmap32;
 
 import javax.annotation.Nullable;
 
@@ -58,9 +59,12 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
+import java.util.function.ToLongFunction;
 import java.util.stream.Collectors;
 
 import static java.lang.String.format;
+import static java.util.Collections.reverseOrder;
+import static java.util.Comparator.comparingLong;
 import static org.apache.paimon.format.blob.BlobFileFormat.isBlobFile;
 import static org.apache.paimon.table.SpecialFields.rowTypeWithRowTracking;
 import static org.apache.paimon.utils.Preconditions.checkArgument;
@@ -69,6 +73,8 @@ import static org.apache.paimon.utils.Preconditions.checkArgument;
  * A union {@link SplitRead} to read multiple inner files to merge columns, note that this class
  * does not support filtering push down and deletion vectors, as they can interfere with the process
  * of merging columns.
+ *
+ * <p>TODO: Optimize implementation of this class.
  */
 public class DataEvolutionSplitRead implements SplitRead<InternalRow> {
 
@@ -78,6 +84,7 @@ public class DataEvolutionSplitRead implements SplitRead<InternalRow> {
     private final FileStorePathFactory pathFactory;
     private final Map<FormatKey, FormatReaderMapping> formatReaderMappings;
     private final Function<Long, TableSchema> schemaFetcher;
+    @Nullable private List<Long> indices;
 
     protected RowType readRowType;
 
@@ -123,6 +130,12 @@ public class DataEvolutionSplitRead implements SplitRead<InternalRow> {
     }
 
     @Override
+    public SplitRead<InternalRow> withRowIds(@Nullable List<Long> indices) {
+        this.indices = indices;
+        return this;
+    }
+
+    @Override
     public RecordReader<InternalRow> createReader(DataSplit split) throws IOException {
         List<DataFileMeta> files = split.dataFiles();
         BinaryRow partition = split.partition();
@@ -139,7 +152,7 @@ public class DataEvolutionSplitRead implements SplitRead<InternalRow> {
                         null,
                         null);
 
-        List<List<DataFileMeta>> splitByRowId = DataEvolutionSplitGenerator.split(files);
+        List<List<DataFileMeta>> splitByRowId = mergeRangesAndSort(files);
         for (List<DataFileMeta> needMergeFiles : splitByRowId) {
             if (needMergeFiles.size() == 1 || readRowType.getFields().isEmpty()) {
                 // No need to merge fields, just create a single file reader
@@ -188,13 +201,15 @@ public class DataEvolutionSplitRead implements SplitRead<InternalRow> {
         long rowCount = fieldsFiles.get(0).rowCount();
         long firstRowId = fieldsFiles.get(0).files().get(0).firstRowId();
 
-        for (FieldBunch bunch : fieldsFiles) {
-            checkArgument(
-                    bunch.rowCount() == rowCount,
-                    "All files in a field merge split should have the same row count.");
-            checkArgument(
-                    bunch.files().get(0).firstRowId() == firstRowId,
-                    "All files in a field merge split should have the same first row id and could not be null.");
+        if (indices == null) {
+            for (FieldBunch bunch : fieldsFiles) {
+                checkArgument(
+                        bunch.rowCount() == rowCount,
+                        "All files in a field merge split should have the same row count.");
+                checkArgument(
+                        bunch.files().get(0).firstRowId() == firstRowId,
+                        "All files in a field merge split should have the same first row id and could not be null.");
+            }
         }
 
         // Init all we need to create a compound reader
@@ -311,9 +326,10 @@ public class DataEvolutionSplitRead implements SplitRead<InternalRow> {
         }
         List<ReaderSupplier<InternalRow>> readerSuppliers = new ArrayList<>();
         for (DataFileMeta file : bunch.files()) {
+            RoaringBitmap32 selection = file.toFileSelection(indices);
             FormatReaderContext formatReaderContext =
                     new FormatReaderContext(
-                            fileIO, dataFilePathFactory.toPath(file), file.fileSize(), null);
+                            fileIO, dataFilePathFactory.toPath(file), file.fileSize(), selection);
             readerSuppliers.add(
                     () ->
                             new DataFileRecordReader(
@@ -338,9 +354,10 @@ public class DataEvolutionSplitRead implements SplitRead<InternalRow> {
             DataFilePathFactory dataFilePathFactory,
             FormatReaderMapping formatReaderMapping)
             throws IOException {
+        RoaringBitmap32 selection = file.toFileSelection(indices);
         FormatReaderContext formatReaderContext =
                 new FormatReaderContext(
-                        fileIO, dataFilePathFactory.toPath(file), file.fileSize(), null);
+                        fileIO, dataFilePathFactory.toPath(file), file.fileSize(), selection);
         return new DataFileRecordReader(
                 schema.logicalRowType(),
                 formatReaderMapping.getReaderFactory(),
@@ -357,6 +374,14 @@ public class DataEvolutionSplitRead implements SplitRead<InternalRow> {
     @VisibleForTesting
     public static List<FieldBunch> splitFieldBunches(
             List<DataFileMeta> needMergeFiles, Function<DataFileMeta, Integer> blobFileToFieldId) {
+        return splitFieldBunches(needMergeFiles, blobFileToFieldId, false);
+    }
+
+    @VisibleForTesting
+    public static List<FieldBunch> splitFieldBunches(
+            List<DataFileMeta> needMergeFiles,
+            Function<DataFileMeta, Integer> blobFileToFieldId,
+            boolean rowIdPushDown) {
         List<FieldBunch> fieldsFiles = new ArrayList<>();
         Map<Integer, BlobBunch> blobBunchMap = new HashMap<>();
         long rowCount = -1;
@@ -365,7 +390,8 @@ public class DataEvolutionSplitRead implements SplitRead<InternalRow> {
                 int fieldId = blobFileToFieldId.apply(file);
                 final long expectedRowCount = rowCount;
                 blobBunchMap
-                        .computeIfAbsent(fieldId, key -> new BlobBunch(expectedRowCount))
+                        .computeIfAbsent(
+                                fieldId, key -> new BlobBunch(expectedRowCount, rowIdPushDown))
                         .add(file);
             } else {
                 // Normal file, just add it to the current merge split
@@ -409,16 +435,18 @@ public class DataEvolutionSplitRead implements SplitRead<InternalRow> {
 
         final List<DataFileMeta> files;
         final long expectedRowCount;
+        final boolean rowIdPushDown;
 
         long latestFistRowId = -1;
         long expectedNextFirstRowId = -1;
         long latestMaxSequenceNumber = -1;
         long rowCount;
 
-        BlobBunch(long expectedRowCount) {
+        BlobBunch(long expectedRowCount, boolean rowIdPushDown) {
             this.files = new ArrayList<>();
             this.rowCount = 0;
             this.expectedRowCount = expectedRowCount;
+            this.rowIdPushDown = rowIdPushDown;
         }
 
         void add(DataFileMeta file) {
@@ -435,24 +463,37 @@ public class DataEvolutionSplitRead implements SplitRead<InternalRow> {
             }
             if (!files.isEmpty()) {
                 long firstRowId = file.firstRowId();
-                if (firstRowId < expectedNextFirstRowId) {
-                    checkArgument(
-                            file.maxSequenceNumber() < latestMaxSequenceNumber,
-                            "Blob file with overlapping row id should have decreasing sequence number.");
-                    return;
-                } else if (firstRowId > expectedNextFirstRowId) {
-                    throw new IllegalArgumentException(
-                            "Blob file first row id should be continuous, expect "
-                                    + expectedNextFirstRowId
-                                    + " but got "
-                                    + firstRowId);
+                if (rowIdPushDown) {
+                    if (firstRowId < expectedNextFirstRowId) {
+                        if (file.maxSequenceNumber() > latestMaxSequenceNumber) {
+                            DataFileMeta lastFile = files.remove(files.size() - 1);
+                            rowCount -= lastFile.rowCount();
+                        } else {
+                            return;
+                        }
+                    }
+                } else {
+                    if (firstRowId < expectedNextFirstRowId) {
+                        checkArgument(
+                                file.maxSequenceNumber() < latestMaxSequenceNumber,
+                                "Blob file with overlapping row id should have decreasing sequence number.");
+                        return;
+                    } else if (firstRowId > expectedNextFirstRowId) {
+                        throw new IllegalArgumentException(
+                                "Blob file first row id should be continuous, expect "
+                                        + expectedNextFirstRowId
+                                        + " but got "
+                                        + firstRowId);
+                    }
                 }
-                checkArgument(
-                        file.schemaId() == files.get(0).schemaId(),
-                        "All files in a blob bunch should have the same schema id.");
-                checkArgument(
-                        file.writeCols().equals(files.get(0).writeCols()),
-                        "All files in a blob bunch should have the same write columns.");
+                if (!files.isEmpty()) {
+                    checkArgument(
+                            file.schemaId() == files.get(0).schemaId(),
+                            "All files in a blob bunch should have the same schema id.");
+                    checkArgument(
+                            file.writeCols().equals(files.get(0).writeCols()),
+                            "All files in a blob bunch should have the same write columns.");
+                }
             }
             files.add(file);
             rowCount += file.rowCount();
@@ -473,5 +514,47 @@ public class DataEvolutionSplitRead implements SplitRead<InternalRow> {
         public List<DataFileMeta> files() {
             return files;
         }
+    }
+
+    public static List<List<DataFileMeta>> mergeRangesAndSort(List<DataFileMeta> files) {
+        // group by row id range
+        ToLongFunction<DataFileMeta> firstRowIdFunc = DataFileMeta::nonNullFirstRowId;
+        ToLongFunction<DataFileMeta> endRowIdF = f -> f.nonNullFirstRowId() + f.rowCount() - 1;
+        ToLongFunction<DataFileMeta> maxSeqF = DataFileMeta::maxSequenceNumber;
+        RangeHelper<DataFileMeta> rangeHelper = new RangeHelper<>(firstRowIdFunc, endRowIdF);
+        List<List<DataFileMeta>> result = rangeHelper.mergeOverlappingRanges(files);
+
+        // in group, sort by blob file and max_seq
+        for (List<DataFileMeta> group : result) {
+            // split to data files and blob files
+            List<DataFileMeta> dataFiles = new ArrayList<>();
+            List<DataFileMeta> blobFiles = new ArrayList<>();
+            for (DataFileMeta f : group) {
+                if (isBlobFile(f.fileName())) {
+                    blobFiles.add(f);
+                } else {
+                    dataFiles.add(f);
+                }
+            }
+
+            // data files sort by reversed max sequence number
+            dataFiles.sort(comparingLong(maxSeqF).reversed());
+            checkArgument(
+                    rangeHelper.areAllRangesSame(dataFiles),
+                    "Data files %s should be all row id ranges same.",
+                    dataFiles);
+
+            // blob files sort by first row id then by reversed max sequence number
+            blobFiles.sort(
+                    comparingLong(firstRowIdFunc)
+                            .thenComparing(reverseOrder(comparingLong(maxSeqF))));
+
+            // concat data files and blob files
+            group.clear();
+            group.addAll(dataFiles);
+            group.addAll(blobFiles);
+        }
+
+        return result;
     }
 }

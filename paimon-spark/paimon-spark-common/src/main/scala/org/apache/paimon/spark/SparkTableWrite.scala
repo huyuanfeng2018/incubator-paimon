@@ -18,13 +18,15 @@
 
 package org.apache.paimon.spark
 
+import org.apache.paimon.catalog.CatalogContext
+import org.apache.paimon.data.BinaryRow
 import org.apache.paimon.disk.IOManager
 import org.apache.paimon.spark.util.SparkRowUtils
-import org.apache.paimon.table.sink.{BatchTableWrite, BatchWriteBuilder, CommitMessageImpl, CommitMessageSerializer}
+import org.apache.paimon.spark.write.DataWriteHelper
+import org.apache.paimon.table.sink.{BatchWriteBuilder, CommitMessageImpl, CommitMessageSerializer, TableWriteImpl}
 import org.apache.paimon.types.RowType
 
-import org.apache.spark.TaskContext
-import org.apache.spark.sql.{PaimonUtils, Row}
+import org.apache.spark.sql.Row
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable.ListBuffer
@@ -33,33 +35,43 @@ case class SparkTableWrite(
     writeBuilder: BatchWriteBuilder,
     writeType: RowType,
     rowKindColIdx: Int = -1,
-    writeRowTracking: Boolean = false)
-  extends SparkTableWriteTrait {
+    writeRowTracking: Boolean = false,
+    fullCompactionDeltaCommits: Option[Int],
+    batchId: Long,
+    blobAsDescriptor: Boolean,
+    catalogContext: CatalogContext,
+    postponePartitionBucketComputer: Option[BinaryRow => Integer])
+  extends SparkTableWriteTrait
+  with DataWriteHelper {
 
   private val ioManager: IOManager = SparkUtils.createIOManager
 
-  private val write: BatchTableWrite = {
-    val _write = writeBuilder.newWrite()
+  val write: TableWriteImpl[Row] = {
+    val _write = writeBuilder.newWrite().asInstanceOf[TableWriteImpl[Row]]
     _write.withIOManager(ioManager)
     if (writeRowTracking) {
       _write.withWriteType(writeType)
+    }
+    if (postponePartitionBucketComputer.isDefined) {
+      _write.getWrite.withIgnoreNumBucketCheck(true)
     }
     _write
   }
 
   private val toPaimonRow = {
-    SparkRowUtils.toPaimonRow(writeType, rowKindColIdx)
+    SparkRowUtils.toPaimonRow(writeType, rowKindColIdx, blobAsDescriptor, catalogContext)
   }
 
   def write(row: Row): Unit = {
-    write.write(toPaimonRow(row))
+    postWrite(write.writeAndReturn(toPaimonRow(row)))
   }
 
   def write(row: Row, bucket: Int): Unit = {
-    write.write(toPaimonRow(row), bucket)
+    postWrite(write.writeAndReturn(toPaimonRow(row), bucket))
   }
 
   def finish(): Iterator[Array[Byte]] = {
+    preFinish()
     var bytesWritten = 0L
     var recordsWritten = 0L
     val commitMessages = new ListBuffer[Array[Byte]]()
@@ -71,7 +83,17 @@ case class SparkTableWrite(
             bytesWritten += dataFileMeta.fileSize()
             recordsWritten += dataFileMeta.rowCount()
         }
-        commitMessages += serializer.serialize(message)
+        val finalMessage = if (postponePartitionBucketComputer.isDefined) {
+          new CommitMessageImpl(
+            message.partition(),
+            message.bucket(),
+            postponePartitionBucketComputer.get.apply(message.partition()),
+            message.newFilesIncrement(),
+            message.compactIncrement())
+        } else {
+          message
+        }
+        commitMessages += serializer.serialize(finalMessage)
     }
     reportOutputMetrics(bytesWritten, recordsWritten)
     commitMessages.iterator

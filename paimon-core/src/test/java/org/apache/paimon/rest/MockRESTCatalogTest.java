@@ -18,8 +18,10 @@
 
 package org.apache.paimon.rest;
 
+import org.apache.paimon.CoreOptions;
 import org.apache.paimon.PagedList;
 import org.apache.paimon.Snapshot;
+import org.apache.paimon.TableType;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.CatalogContext;
 import org.apache.paimon.catalog.Identifier;
@@ -34,6 +36,8 @@ import org.apache.paimon.rest.auth.DLFTokenLoaderFactory;
 import org.apache.paimon.rest.auth.RESTAuthParameter;
 import org.apache.paimon.rest.exceptions.NotAuthorizedException;
 import org.apache.paimon.rest.responses.ConfigResponse;
+import org.apache.paimon.schema.Schema;
+import org.apache.paimon.types.DataTypes;
 
 import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableMap;
 
@@ -49,6 +53,7 @@ import java.util.Map;
 import java.util.UUID;
 
 import static org.apache.paimon.rest.RESTApi.HEADER_PREFIX;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -168,6 +173,65 @@ class MockRESTCatalogTest extends RESTCatalogTest {
         RESTCatalog restCatalog2 = restCatalog.catalogLoader().load();
         Map<String, String> headers2 = restCatalog2.api().authFunction().apply(restAuthParameter);
         assertEquals(headers2.get("User-Agent"), "test");
+    }
+
+    @Test
+    void testBaseHeadersInRequests() throws Exception {
+        // Set custom headers in options
+        String customHeaderName = "custom-header";
+        String customHeaderValue = "custom-value";
+        options.set(HEADER_PREFIX + customHeaderName, customHeaderValue);
+
+        // Clear any previous headers
+        restCatalogServer.clearReceivedHeaders();
+        assertEquals(0, restCatalogServer.getReceivedHeaders().size());
+
+        // Initialize catalog with custom headers
+        RESTCatalog restCatalog = initCatalog(false);
+        // init catalog will trigger REST GetConfig request
+        checkHeader(customHeaderName, customHeaderValue);
+
+        // Clear any previous headers
+        restCatalogServer.clearReceivedHeaders();
+        assertEquals(0, restCatalogServer.getReceivedHeaders().size());
+
+        // Perform an operation that will trigger REST request
+        restCatalog.listDatabases();
+        checkHeader(customHeaderName, customHeaderValue);
+    }
+
+    @Test
+    void testCreateFormatTableWhenEnableDataToken() throws Exception {
+        RESTCatalog restCatalog = initCatalog(true);
+        restCatalog.createDatabase("test_db", false);
+        // Create table creates a new table when it does not exist
+        Identifier identifier = Identifier.create("test_db", "new_table");
+        Schema schema = Schema.newBuilder().column("c1", DataTypes.INT()).build();
+        schema.options().put(CoreOptions.TYPE.key(), TableType.FORMAT_TABLE.toString());
+        schema.options().put(CoreOptions.FORMAT_TABLE_IMPLEMENTATION.key(), "engine");
+
+        assertThatExceptionOfType(IllegalArgumentException.class)
+                .isThrownBy(() -> restCatalog.createTable(identifier, schema, false))
+                .withMessage(
+                        "Cannot define format-table.implementation is engine for format table when data token is enabled and not define path.");
+        catalog.dropTable(identifier, true);
+    }
+
+    private void checkHeader(String headerName, String headerValue) {
+        // Verify that the header were included in the requests
+        List<Map<String, String>> receivedHeaders = restCatalogServer.getReceivedHeaders();
+        assert receivedHeaders.size() > 0 : "No requests were recorded";
+
+        // Check that request contains our custom headers
+        boolean foundCustomHeader = false;
+
+        for (Map<String, String> headers : receivedHeaders) {
+            if (headerValue.equals(headers.get(headerName))) {
+                foundCustomHeader = true;
+            }
+        }
+
+        assert foundCustomHeader : "Header was not found in any request";
     }
 
     private void testDlfAuth(RESTCatalog restCatalog) throws Exception {

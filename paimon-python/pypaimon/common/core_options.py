@@ -18,6 +18,8 @@
 
 from enum import Enum
 
+from pypaimon.common.memory_size import MemorySize
+
 
 class CoreOptions(str, Enum):
     """Core options for paimon."""
@@ -33,16 +35,62 @@ class CoreOptions(str, Enum):
     BUCKET = "bucket"
     BUCKET_KEY = "bucket-key"
     WAREHOUSE = "warehouse"
+    SCAN_MANIFEST_PARALLELISM = "scan.manifest.parallelism"
     # File format options
     FILE_FORMAT = "file.format"
     FILE_FORMAT_ORC = "orc"
     FILE_FORMAT_AVRO = "avro"
     FILE_FORMAT_PARQUET = "parquet"
+    FILE_FORMAT_BLOB = "blob"
     FILE_COMPRESSION = "file.compression"
     FILE_COMPRESSION_PER_LEVEL = "file.compression.per.level"
     FILE_FORMAT_PER_LEVEL = "file.format.per.level"
     FILE_BLOCK_SIZE = "file.block-size"
+    FILE_BLOB_AS_DESCRIPTOR = "blob-as-descriptor"
+    TARGET_FILE_SIZE = "target-file-size"
+    BLOB_TARGET_FILE_SIZE = "blob.target-file-size"
     # Scan options
     SCAN_FALLBACK_BRANCH = "scan.fallback-branch"
+    INCREMENTAL_BETWEEN_TIMESTAMP = "incremental-between-timestamp"
+    SOURCE_SPLIT_TARGET_SIZE = "source.split.target-size"
+    SOURCE_SPLIT_OPEN_FILE_COST = "source.split.open-file-cost"
     # Commit options
     COMMIT_USER_PREFIX = "commit.user-prefix"
+    ROW_TRACKING_ENABLED = "row-tracking.enabled"
+    DATA_EVOLUTION_ENABLED = "data-evolution.enabled"
+
+    @staticmethod
+    def get_blob_as_descriptor(options: dict) -> bool:
+        return options.get(CoreOptions.FILE_BLOB_AS_DESCRIPTOR, "false").lower() == 'true'
+
+    @staticmethod
+    def get_split_target_size(options: dict) -> int:
+        """Get split target size from options, default to 128MB."""
+        if CoreOptions.SOURCE_SPLIT_TARGET_SIZE in options:
+            size_str = options[CoreOptions.SOURCE_SPLIT_TARGET_SIZE]
+            return MemorySize.parse(size_str).get_bytes()
+        return MemorySize.of_mebi_bytes(128).get_bytes()
+
+    @staticmethod
+    def get_split_open_file_cost(options: dict) -> int:
+        """Get split open file cost from options, default to 4MB."""
+        if CoreOptions.SOURCE_SPLIT_OPEN_FILE_COST in options:
+            cost_str = options[CoreOptions.SOURCE_SPLIT_OPEN_FILE_COST]
+            return MemorySize.parse(cost_str).get_bytes()
+        return MemorySize.of_mebi_bytes(4).get_bytes()
+
+    @staticmethod
+    def get_target_file_size(options: dict, has_primary_key: bool = False) -> int:
+        """Get target file size from options, default to 128MB for primary key table, 256MB for append-only table."""
+        if CoreOptions.TARGET_FILE_SIZE in options:
+            size_str = options[CoreOptions.TARGET_FILE_SIZE]
+            return MemorySize.parse(size_str).get_bytes()
+        return MemorySize.of_mebi_bytes(128 if has_primary_key else 256).get_bytes()
+
+    @staticmethod
+    def get_blob_target_file_size(options: dict) -> int:
+        """Get blob target file size from options, default to target-file-size (256MB for append-only table)."""
+        if CoreOptions.BLOB_TARGET_FILE_SIZE in options:
+            size_str = options[CoreOptions.BLOB_TARGET_FILE_SIZE]
+            return MemorySize.parse(size_str).get_bytes()
+        return CoreOptions.get_target_file_size(options, has_primary_key=False)

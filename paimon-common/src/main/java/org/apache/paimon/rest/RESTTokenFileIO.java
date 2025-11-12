@@ -25,6 +25,7 @@ import org.apache.paimon.fs.FileStatus;
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.fs.PositionOutputStream;
 import org.apache.paimon.fs.SeekableInputStream;
+import org.apache.paimon.fs.TwoPhaseOutputStream;
 import org.apache.paimon.options.ConfigOption;
 import org.apache.paimon.options.ConfigOptions;
 import org.apache.paimon.options.Options;
@@ -45,7 +46,6 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.Map;
 import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 
 import static org.apache.paimon.options.CatalogOptions.FILE_IO_ALLOW_CACHE;
 import static org.apache.paimon.rest.RESTApi.TOKEN_EXPIRATION_SAFE_TIME_MILLIS;
@@ -64,7 +64,6 @@ public class RESTTokenFileIO implements FileIO {
 
     private static final Cache<RESTToken, FileIO> FILE_IO_CACHE =
             Caffeine.newBuilder()
-                    .expireAfterAccess(30, TimeUnit.MINUTES)
                     .maximumSize(1000)
                     .removalListener(
                             (ignored, value, cause) -> IOUtils.closeQuietly((FileIO) value))
@@ -110,6 +109,12 @@ public class RESTTokenFileIO implements FileIO {
     @Override
     public PositionOutputStream newOutputStream(Path path, boolean overwrite) throws IOException {
         return fileIO().newOutputStream(path, overwrite);
+    }
+
+    @Override
+    public TwoPhaseOutputStream newTwoPhaseOutputStream(Path path, boolean overwrite)
+            throws IOException {
+        return fileIO().newTwoPhaseOutputStream(path, overwrite);
     }
 
     @Override
