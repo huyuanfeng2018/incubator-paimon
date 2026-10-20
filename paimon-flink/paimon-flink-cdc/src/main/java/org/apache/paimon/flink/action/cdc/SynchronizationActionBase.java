@@ -117,18 +117,27 @@ public abstract class SynchronizationActionBase extends ActionBase {
 
     @Override
     public void build() throws Exception {
-        syncJobHandler.checkRequiredOption();
+        validateSourceOptions();
 
         catalog.createDatabase(database, true);
 
         beforeBuildingSourceSink();
 
-        DataStream<RichCdcMultiplexRecord> input =
-                buildDataStreamSource(buildSource()).flatMap(recordParse()).name("Parse");
+        DataStream<RichCdcMultiplexRecord> input = buildInput();
 
         EventParser.Factory<RichCdcMultiplexRecord> parserFactory = buildEventParserFactory();
 
         buildSink(input, parserFactory);
+    }
+
+    protected void validateSourceOptions() {
+        syncJobHandler.checkRequiredOption();
+    }
+
+    protected DataStream<RichCdcMultiplexRecord> buildInput() {
+        return buildDataStreamSource(buildSource(), syncJobHandler.provideSourceName())
+                .flatMap(recordParse())
+                .name("Parse");
     }
 
     protected void beforeBuildingSourceSink() throws Exception {}
@@ -149,8 +158,8 @@ public abstract class SynchronizationActionBase extends ActionBase {
                 "It's only support STREAMING mode for flink-cdc sync table action.");
     }
 
-    private DataStreamSource<CdcSourceRecord> buildDataStreamSource(
-            Source<CdcSourceRecord, ?, ?> source) {
+    protected DataStreamSource<CdcSourceRecord> buildDataStreamSource(
+            Source<CdcSourceRecord, ?, ?> source, String sourceName) {
         boolean isAutomaticWatermarkCreationEnabled =
                 tableConfig.containsKey(CoreOptions.TAG_AUTOMATIC_CREATION.key())
                         && Objects.equals(
@@ -174,7 +183,7 @@ public abstract class SynchronizationActionBase extends ActionBase {
         if (idleTimeout != null) {
             watermarkStrategy = watermarkStrategy.withIdleness(idleTimeout);
         }
-        return env.fromSource(source, watermarkStrategy, syncJobHandler.provideSourceName());
+        return env.fromSource(source, watermarkStrategy, sourceName);
     }
 
     protected abstract FlatMapFunction<CdcSourceRecord, RichCdcMultiplexRecord> recordParse();
