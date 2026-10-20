@@ -59,6 +59,31 @@ public final class MySqlSourceConfigs {
         this.sources = Collections.unmodifiableList(new ArrayList<>(sources));
     }
 
+    /** Database synchronization retains its legacy single-instance implementation. */
+    static Map<String, String> requireSingleSourceForDatabase(Map<String, String> options) {
+        for (String key : options.keySet()) {
+            rejectDatabaseOption(key);
+        }
+        return options;
+    }
+
+    static void rejectDatabaseCliOptions(Iterable<String> options) {
+        if (options != null) {
+            for (String option : options) {
+                int separator = option.indexOf('=');
+                rejectDatabaseOption(
+                        (separator < 0 ? option : option.substring(0, separator)).trim());
+            }
+        }
+    }
+
+    private static void rejectDatabaseOption(String key) {
+        if (key.startsWith(SOURCE_PREFIX) || key.startsWith("multi-source.")) {
+            throw new IllegalArgumentException(
+                    "Named MySQL sources are supported only by mysql_sync_table, not mysql_sync_database.");
+        }
+    }
+
     /** Validates both supported CLI spellings without changing the legacy fallback behavior. */
     static void validateCliOptions(
             Iterable<String> selectedOptions, Iterable<String> hyphenatedOptions) {
@@ -217,7 +242,7 @@ public final class MySqlSourceConfigs {
      * validation behavior. Error messages deliberately exclude option values and exception causes,
      * which can otherwise expose credentials or other sensitive connection details.
      */
-    public void validate(boolean tableSync, int defaultParallelism) {
+    public void validate(int defaultParallelism) {
         if (!named) {
             return;
         }
@@ -230,15 +255,8 @@ public final class MySqlSourceConfigs {
             require(source.id, options, MySqlSourceOptions.PASSWORD.key(), true);
             require(source.id, options, MySqlSourceOptions.DATABASE_NAME.key(), false);
             validatePattern(source.id, options, MySqlSourceOptions.DATABASE_NAME.key());
-            if (tableSync) {
-                require(source.id, options, MySqlSourceOptions.TABLE_NAME.key(), false);
-                validatePattern(source.id, options, MySqlSourceOptions.TABLE_NAME.key());
-            } else if (options.containsKey(MySqlSourceOptions.TABLE_NAME.key())) {
-                throw invalidOption(
-                        source.id,
-                        MySqlSourceOptions.TABLE_NAME.key(),
-                        "is not supported by database synchronization; use including-tables instead");
-            }
+            require(source.id, options, MySqlSourceOptions.TABLE_NAME.key(), false);
+            validatePattern(source.id, options, MySqlSourceOptions.TABLE_NAME.key());
 
             int parallelism = source.parallelism(defaultParallelism);
             ServerIdRange range = parseServerIdRange(source.id, options);

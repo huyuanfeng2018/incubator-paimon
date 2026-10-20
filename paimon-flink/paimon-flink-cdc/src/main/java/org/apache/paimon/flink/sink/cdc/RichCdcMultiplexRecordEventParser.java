@@ -18,12 +18,9 @@
 
 package org.apache.paimon.flink.sink.cdc;
 
-import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.flink.action.cdc.TableNameConverter;
 import org.apache.paimon.schema.Schema;
-import org.apache.paimon.schema.TableSchema;
-import org.apache.paimon.table.FileStoreTable;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -39,7 +36,6 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
 
-import static org.apache.paimon.utils.Preconditions.checkArgument;
 import static org.apache.paimon.utils.Preconditions.checkNotNull;
 
 /** {@link EventParser} for {@link RichCdcMultiplexRecord}. */
@@ -134,43 +130,6 @@ public class RichCdcMultiplexRecordEventParser implements EventParser<RichCdcMul
         }
 
         return Optional.empty();
-    }
-
-    @Override
-    public void validateTableSchema(Catalog catalog, Identifier identifier) throws Exception {
-        if (!shouldSynchronizeCurrentTable
-                || schemaBuilder == null
-                || record.cdcSchema().fields().isEmpty()) {
-            return;
-        }
-        Optional<Schema> expected = schemaBuilder.buildForValidation(record);
-        if (!expected.isPresent()) {
-            return;
-        }
-
-        // Read the actual table, not a source-local cache. Another source or a previous execution
-        // may have created this target with different keys, even if parseNewTable returned a schema.
-        TableSchema existing = ((FileStoreTable) catalog.getTable(identifier)).schema();
-        checkArgument(
-                existing.primaryKeys().equals(expected.get().primaryKeys()),
-                "Physical source table '%s.%s' resolves to primary keys %s, but Paimon table '%s' "
-                        + "has primary keys %s. Refusing to attach an incompatible shard.",
-                record.databaseName(),
-                record.tableName(),
-                expected.get().primaryKeys(),
-                identifier.getFullName(),
-                existing.primaryKeys());
-        checkArgument(
-                existing.partitionKeys().equals(expected.get().partitionKeys()),
-                "Physical source table '%s.%s' resolves to partition keys %s, but Paimon table '%s' "
-                        + "has partition keys %s. Refusing to attach an incompatible shard.",
-                record.databaseName(),
-                record.tableName(),
-                expected.get().partitionKeys(),
-                identifier.getFullName(),
-                existing.partitionKeys());
-        // Do not compare ordinary columns here: ADD COLUMN and type widening must still reach
-        // schema evolution, whereas primary and partition keys cannot be changed in place.
     }
 
     private boolean shouldSynchronizeCurrentDb() {

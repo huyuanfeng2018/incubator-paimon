@@ -24,14 +24,11 @@ import org.apache.paimon.schema.Schema;
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
 import static org.apache.paimon.flink.action.cdc.CdcActionCommonUtils.buildPaimonSchema;
-import static org.apache.paimon.flink.action.cdc.CdcActionCommonUtils.listCaseConvert;
-import static org.apache.paimon.utils.Preconditions.checkArgument;
 
 /** Build schema for new table found in database synchronization. */
 public class NewTableSchemaBuilder implements Serializable {
@@ -44,9 +41,6 @@ public class NewTableSchemaBuilder implements Serializable {
     private final boolean syncPKeysFromSourceSchema;
     private final CdcMetadataConverter[] metadataConverters;
     private final Map<String, List<String>> partitionKeyMultiple;
-    private List<String> primaryKeyPrefix = Collections.emptyList();
-    private boolean strictlyCheckSpecified = false;
-    private boolean validateTableSchema = false;
 
     public NewTableSchemaBuilder(
             Map<String, String> tableConfig,
@@ -67,47 +61,6 @@ public class NewTableSchemaBuilder implements Serializable {
         this.partitionKeyMultiple = partitionKeyMultiple;
     }
 
-    /** Prepends source identity columns to each table's resolved business primary key. */
-    public NewTableSchemaBuilder withPrimaryKeyPrefix(List<String> primaryKeyPrefix) {
-        this.primaryKeyPrefix = new ArrayList<>(primaryKeyPrefix);
-        return this;
-    }
-
-    /** Requires explicitly configured keys to exist in newly discovered tables. */
-    public NewTableSchemaBuilder withStrictlyCheckSpecified(boolean strictlyCheckSpecified) {
-        this.strictlyCheckSpecified = strictlyCheckSpecified;
-        return this;
-    }
-
-    /** Also validates physical shards mapped to a table that already exists. */
-    public NewTableSchemaBuilder withTableSchemaValidation(boolean validateTableSchema) {
-        this.validateTableSchema = validateTableSchema;
-        return this;
-    }
-
-    /** Resolves the same key policy as table creation without consulting the created-table cache. */
-    public Optional<Schema> buildForValidation(RichCdcMultiplexRecord record) {
-        if (!validateTableSchema) {
-            return Optional.empty();
-        }
-        Optional<Schema> expected = build(record);
-        expected.ifPresent(
-                schema -> {
-                    List<String> sourceKeys =
-                            listCaseConvert(record.cdcSchema().primaryKeys(), caseSensitive);
-                    checkArgument(
-                            !sourceKeys.isEmpty() && schema.primaryKeys().containsAll(sourceKeys),
-                            "Physical source table '%s.%s' has primary keys %s, but the resolved "
-                                    + "target primary keys %s do not retain them. Explicit primary "
-                                    + "keys must not discard a physical shard's uniqueness.",
-                            record.databaseName(),
-                            record.tableName(),
-                            sourceKeys,
-                            schema.primaryKeys());
-                });
-        return expected;
-    }
-
     public Optional<Schema> build(RichCdcMultiplexRecord record) {
         Schema sourceSchema = record.buildSchema();
         List<String> specifiedPartitionKeys = new ArrayList<>();
@@ -119,7 +72,7 @@ public class NewTableSchemaBuilder implements Serializable {
             specifiedPartitionKeys = partitionKeys;
         }
 
-        Schema schema =
+        return Optional.of(
                 buildPaimonSchema(
                         record.tableName(),
                         specifiedPartitionKeys,
@@ -129,23 +82,8 @@ public class NewTableSchemaBuilder implements Serializable {
                         sourceSchema,
                         metadataConverters,
                         caseSensitive,
-                        strictlyCheckSpecified,
+                        false,
                         requirePrimaryKeys,
-                        syncPKeysFromSourceSchema);
-        if (!primaryKeyPrefix.isEmpty()) {
-            checkArgument(
-                    schema.primaryKeys().stream().anyMatch(k -> !primaryKeyPrefix.contains(k)),
-                    "Source identity columns must accompany a business primary key.");
-            LinkedHashSet<String> keys = new LinkedHashSet<>(primaryKeyPrefix);
-            keys.addAll(schema.primaryKeys());
-            schema =
-                    new Schema(
-                            schema.fields(),
-                            schema.partitionKeys(),
-                            new ArrayList<>(keys),
-                            schema.options(),
-                            schema.comment());
-        }
-        return Optional.of(schema);
+                        syncPKeysFromSourceSchema));
     }
 }

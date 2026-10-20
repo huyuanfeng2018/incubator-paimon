@@ -263,7 +263,7 @@ to avoid potential name conflict.
 
 ## Synchronizing Multiple MySQL Instances
 
-Both `mysql_sync_table` and `mysql_sync_database` accept named MySQL instances through
+Only `mysql_sync_table` accepts named MySQL instances through
 `--mysql_conf source.<id>.<option>=<value>`. Each instance has an independent connection,
 CDC Source, parser, startup position, and source state within the same Flink job.
 Options without a source prefix are shared defaults, and instance options override them.
@@ -327,40 +327,42 @@ automatically add identity metadata. Concurrent updates from separate MySQL inst
 have no global transaction order or timestamp-based conflict resolution provided by
 this feature.
 
-### Database synchronization
+### Table-only scope and physical shards
 
-For `mysql_sync_database`, use the same named options, omit `mysql_conf table-name`,
-and select tables through `--including_tables` and `--excluding_tables`. Named database
-synchronization requires `--merge_shards true`; both `--mode divided` and `--mode combined`
-are supported. Tables are grouped by their final names after `table_mapping`,
-`table_prefix`, and `table_suffix` are applied. Exclusions are tracked per instance.
-When `--ignore_incompatible true` is set, a group incompatible with an existing Paimon
-target is excluded as a whole, including later shards mapped to that rejected target.
-Schemas that cannot be merged between source shards still fail startup. Every configured instance must retain at least one eligible primary-key table.
+One job writes to one explicitly named Paimon table. The existing single-instance
+`mysql_sync_database` action is unchanged; it rejects `source.*` and `multi-source.*`
+options rather than silently reading only one of the requested instances. Named table
+synchronization requires `sync_primary_keys_from_source_schema=true`.
 
-Named database mode does not support `--table_prefix_db`, `--table_suffix_db`, or
-`--computed_column`. Named modes require `--sync_primary_keys_from_source_schema true`.
-In combined mode, newly created target tables receive the same identity metadata and
-primary-key policy. A newly discovered shard mapped to an existing target must have
-compatible business keys and schema. The existing catalog disallows changing the types
-of target primary-key columns; this feature retains that restriction. Compatible
-widening of non-key columns continues to use the existing schema evolution mechanism.
+The database and table regular expressions are evaluated during startup discovery.
+The source then uses a deterministic, literal list of those physical tables. Adding a
+physical shard requires restarting the job and validating it during discovery; live
+shard discovery and runtime creation of additional target tables are not supported.
+Treat changes to the physical source set as a migration requiring separate recovery
+validation, not as a promise of transparent savepoint compatibility.
+
+An explicit target primary key must retain every physical source primary-key column.
+This check runs before creating a target or changing its options. During ingestion,
+primary-key names or types changing on a monitored shard fail the job before that
+schema event is emitted. Missing or malformed schema history also fails closed.
+Ordinary non-key columns continue to use the existing schema evolution path.
 
 ### Ordering and recovery
 
 Each source and its parser use equal parallelism with forward edges. Parsed records
 are then partitioned by the final target table and typed target primary key before
-entering the existing sink. Targets unknown during job construction are routed by
-whole table for the duration of that run, which keeps their event order but limits that
-routing stage to one partition per new table.
+entering the existing single-table sink. Source-key validation happens in each source
+parser before the merge and partitioning stage.
 
 All sources participate in the same job checkpoint, while retaining independent source
 positions. One slow or failed instance can affect the whole job. This does not create
 a transactionally consistent snapshot or event order across separate MySQL instances.
 
 Named sources are sorted by their stable IDs and use explicit source/parser UIDs.
-Restoring a savepoint with the same source identities and key mode supports reordered
-configuration declarations. Adding, removing, or renaming sources, changing key modes,
+Source UID assignment is independent of configuration declaration order. A previous
+implementation passed a reordered-configuration savepoint test; the narrowed table-only
+implementation must be revalidated end to end before deployment. Adding, removing, or
+renaming sources, changing key modes,
 migrating an existing legacy job, and rescaling during snapshots require separate
 migration validation. When rebuilding a graph whose routing has changed, use an aligned
 checkpoint or savepoint; restoration from an unaligned checkpoint containing old channel

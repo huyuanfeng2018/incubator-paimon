@@ -112,11 +112,6 @@ public class CdcDynamicTableParsingProcessFunction<T> extends ProcessFunction<T,
                             }
                         });
 
-        // Validate every physical shard, including those mapped to already-created targets.
-        // Keep validation outside the creation catch block so a mismatch fails the job rather
-        // than logging and forwarding records with an incompatible key.
-        parser.validateTableSchema(catalog, Identifier.create(database, tableName));
-
         CdcSchema schemaChange = parser.parseSchemaChange();
         if (schemaChange != null) {
             context.output(

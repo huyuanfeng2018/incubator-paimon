@@ -32,7 +32,6 @@ import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.RowKind;
 import org.apache.paimon.utils.JsonSerdeUtil;
 import org.apache.paimon.utils.Preconditions;
-import org.apache.paimon.utils.SerializablePredicate;
 
 import org.apache.paimon.shade.jackson2.com.fasterxml.jackson.core.type.TypeReference;
 import org.apache.paimon.shade.jackson2.com.fasterxml.jackson.databind.DeserializationFeature;
@@ -90,7 +89,7 @@ public class MySqlRecordParser implements FlatMapFunction<CdcSourceRecord, RichC
     private String databaseName;
     private final CdcMetadataConverter[] metadataConverters;
     private final boolean caseSensitive;
-    @Nullable private SerializablePredicate<Identifier> tableFilter;
+    @Nullable private MySqlTableSchemaValidator tableSchemaValidator;
 
     private final Set<Identifier> nonPkTables = new HashSet<>();
 
@@ -131,9 +130,9 @@ public class MySqlRecordParser implements FlatMapFunction<CdcSourceRecord, RichC
                         : ZoneId.of(stringifyServerTimeZone);
     }
 
-    /** Filters physical source tables before interpreting their schema or row values. */
-    public MySqlRecordParser withTableFilter(SerializablePredicate<Identifier> tableFilter) {
-        this.tableFilter = tableFilter;
+    /** Named table-sync validates source constraints before schema or row events leave the parser. */
+    MySqlRecordParser withTableSchemaValidator(MySqlTableSchemaValidator validator) {
+        this.tableSchemaValidator = validator;
         return this;
     }
 
@@ -144,9 +143,8 @@ public class MySqlRecordParser implements FlatMapFunction<CdcSourceRecord, RichC
         currentTable = root.payload().source().get(AbstractSourceInfo.TABLE_NAME_KEY).asText();
         databaseName = root.payload().source().get(AbstractSourceInfo.DATABASE_NAME_KEY).asText();
 
-        if (tableFilter != null
-                && !tableFilter.test(Identifier.create(databaseName, currentTable))) {
-            return;
+        if (tableSchemaValidator != null) {
+            tableSchemaValidator.validateTable(Identifier.create(databaseName, currentTable));
         }
 
         if (root.payload().isSchemaChange()) {
@@ -159,6 +157,11 @@ public class MySqlRecordParser implements FlatMapFunction<CdcSourceRecord, RichC
     private List<RichCdcMultiplexRecord> extractSchemaChange() {
         DebeziumEvent.Payload payload = root.payload();
         if (!payload.hasHistoryRecord()) {
+            Preconditions.checkArgument(
+                    tableSchemaValidator == null,
+                    "Missing MySQL schema history for table '%s.%s'; cannot validate primary keys.",
+                    databaseName,
+                    currentTable);
             return Collections.emptyList();
         }
 
@@ -170,14 +173,44 @@ public class MySqlRecordParser implements FlatMapFunction<CdcSourceRecord, RichC
                 tableChange = tableChanges.next();
             }
             if (count != 1) {
+                Preconditions.checkArgument(
+                        tableSchemaValidator == null,
+                        "Expected exactly one MySQL table schema for '%s.%s'.",
+                        databaseName,
+                        currentTable);
                 LOG.error(
                         "Invalid historyRecord, because tableChanges should contain exactly 1 item.\n"
                                 + payload.historyRecord());
                 return Collections.emptyList();
             }
         } catch (Exception e) {
+            if (tableSchemaValidator != null) {
+                throw new IllegalArgumentException(
+                        "Cannot validate MySQL schema history for '"
+                                + databaseName
+                                + "."
+                                + currentTable
+                                + "'.",
+                        e);
+            }
             LOG.error("Failed to parse history record for schema changes", e);
             return Collections.emptyList();
+        }
+
+        Table table = tableChange.getTable();
+        if (tableSchemaValidator != null) {
+            Preconditions.checkArgument(
+                    table != null,
+                    "Missing MySQL table schema for '%s.%s'; cannot validate primary keys.",
+                    databaseName,
+                    currentTable);
+            // Validate before the legacy non-PK suppression and before any collector output.
+            CdcSchema schema = extractSchema(table);
+            tableSchemaValidator.validateSchema(
+                    Identifier.create(databaseName, currentTable), schema);
+            return Collections.singletonList(
+                    new RichCdcMultiplexRecord(
+                            databaseName, currentTable, schema, CdcRecord.emptyRecord()));
         }
 
         if (TableChanges.TableChangeType.CREATE == tableChange.getType()
@@ -189,8 +222,6 @@ public class MySqlRecordParser implements FlatMapFunction<CdcSourceRecord, RichC
             nonPkTables.add(Identifier.create(databaseName, currentTable));
             return Collections.emptyList();
         }
-
-        Table table = tableChange.getTable();
 
         CdcSchema schema = extractSchema(table);
 

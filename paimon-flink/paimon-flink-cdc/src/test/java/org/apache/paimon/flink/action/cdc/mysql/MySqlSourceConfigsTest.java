@@ -87,15 +87,14 @@ class MySqlSourceConfigsTest {
                 .extracting(MySqlSourceConfigs.SourceConfig::id)
                 .containsExactly("default");
         assertThat(configs.firstConfig().toMap()).isEqualTo(options);
-        assertThatCode(() -> configs.validate(true, 100)).doesNotThrowAnyException();
-        assertThatCode(() -> configs.validate(false, 100)).doesNotThrowAnyException();
+        assertThatCode(() -> configs.validate(100)).doesNotThrowAnyException();
     }
 
     @Test
     void testEmptyLegacyConfiguration() {
         MySqlSourceConfigs configs = MySqlSourceConfigs.fromMap(new HashMap<>());
         assertThat(configs.firstConfig().toMap()).isEmpty();
-        assertThatCode(() -> configs.validate(true, 1)).doesNotThrowAnyException();
+        assertThatCode(() -> configs.validate(1)).doesNotThrowAnyException();
     }
 
     @Test
@@ -113,7 +112,7 @@ class MySqlSourceConfigsTest {
         options.put("source.a.jdbc.properties.characterEncoding", "UTF-8");
 
         MySqlSourceConfigs configs = MySqlSourceConfigs.fromMap(options);
-        configs.validate(true, 8);
+        configs.validate(8);
 
         assertThat(configs.isNamed()).isTrue();
         assertThat(configs.isolatePrimaryKeys()).isTrue();
@@ -216,7 +215,7 @@ class MySqlSourceConfigsTest {
         options.remove("source.a.hostname");
         MySqlSourceConfigs configs = MySqlSourceConfigs.fromMap(options);
         assertThat(configs.firstConfig().toMap()).doesNotContainKey("hostname");
-        assertThatThrownBy(() -> configs.validate(true, 1))
+        assertThatThrownBy(() -> configs.validate(1))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("source 'a'")
                 .hasMessageContaining("hostname");
@@ -238,7 +237,7 @@ class MySqlSourceConfigsTest {
     void testMissingRequiredOptions(String key) {
         Map<String, String> options = tableOptions();
         options.remove(key);
-        assertThatThrownBy(() -> MySqlSourceConfigs.fromMap(options).validate(true, 1))
+        assertThatThrownBy(() -> MySqlSourceConfigs.fromMap(options).validate(1))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("source 'a'")
                 .hasMessageContaining(key)
@@ -249,19 +248,7 @@ class MySqlSourceConfigsTest {
     void testExplicitEmptyPasswordIsValid() {
         Map<String, String> options = tableOptions();
         options.put("password", "");
-        assertThatCode(() -> MySqlSourceConfigs.fromMap(options).validate(true, 1))
-                .doesNotThrowAnyException();
-    }
-
-    @Test
-    void testDatabaseSynchronizationDisallowsTableName() {
-        Map<String, String> options = tableOptions();
-        assertThatThrownBy(() -> MySqlSourceConfigs.fromMap(options).validate(false, 1))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("source 'a'")
-                .hasMessageContaining("table-name");
-        options.remove("table-name");
-        assertThatCode(() -> MySqlSourceConfigs.fromMap(options).validate(false, 1))
+        assertThatCode(() -> MySqlSourceConfigs.fromMap(options).validate(1))
                 .doesNotThrowAnyException();
     }
 
@@ -270,7 +257,7 @@ class MySqlSourceConfigsTest {
     void testInvalidRegexDoesNotExposeValues(String key) {
         Map<String, String> options = tableOptions();
         options.put(key, "[sensitive-invalid-regex");
-        assertThatThrownBy(() -> MySqlSourceConfigs.fromMap(options).validate(true, 1))
+        assertThatThrownBy(() -> MySqlSourceConfigs.fromMap(options).validate(1))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining(key)
                 .hasMessageNotContaining("sensitive-invalid-regex")
@@ -299,7 +286,7 @@ class MySqlSourceConfigsTest {
     void testServerIdsAreRequired() {
         Map<String, String> options = tableOptions();
         options.remove("source.a.server-id");
-        assertThatThrownBy(() -> MySqlSourceConfigs.fromMap(options).validate(true, 1))
+        assertThatThrownBy(() -> MySqlSourceConfigs.fromMap(options).validate(1))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("source 'a'")
                 .hasMessageContaining("server-id");
@@ -310,7 +297,7 @@ class MySqlSourceConfigsTest {
     void testServerIdsSupportedByTheBundledConnector(String value) {
         Map<String, String> options = tableOptions();
         options.put("source.a.server-id", value);
-        assertThatCode(() -> MySqlSourceConfigs.fromMap(options).validate(true, 1))
+        assertThatCode(() -> MySqlSourceConfigs.fromMap(options).validate(1))
                 .doesNotThrowAnyException();
         assertThatCode(() -> ServerIdRange.from(value)).doesNotThrowAnyException();
     }
@@ -334,7 +321,7 @@ class MySqlSourceConfigsTest {
             Map<String, String> original = new HashMap<>(options);
 
             MySqlSourceConfigs configs = MySqlSourceConfigs.fromMap(options);
-            configs.validate(true, 1);
+            configs.validate(1);
             String propagated = configs.sources().get(0).config().get(MySqlSourceOptions.SERVER_ID);
             assertThat(propagated).isEqualTo(value.trim());
             assertThatCode(() -> ServerIdRange.from(propagated)).doesNotThrowAnyException();
@@ -364,7 +351,7 @@ class MySqlSourceConfigsTest {
     void testInvalidServerIdRanges(String value) {
         Map<String, String> options = tableOptions();
         options.put("source.a.server-id", value);
-        assertThatThrownBy(() -> MySqlSourceConfigs.fromMap(options).validate(true, 1))
+        assertThatThrownBy(() -> MySqlSourceConfigs.fromMap(options).validate(1))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("source 'a'")
                 .hasMessageContaining("server-id")
@@ -376,19 +363,19 @@ class MySqlSourceConfigsTest {
     void testServerIdRangeCoversEffectiveParallelism() {
         Map<String, String> options = tableOptions();
         options.put("source.a.server-id", "5001-5002");
-        assertThatThrownBy(() -> MySqlSourceConfigs.fromMap(options).validate(true, 3))
+        assertThatThrownBy(() -> MySqlSourceConfigs.fromMap(options).validate(3))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("server-id")
                 .hasMessageContaining("parallelism");
 
         options.put("source.a.scan.parallelism", "2");
-        assertThatCode(() -> MySqlSourceConfigs.fromMap(options).validate(true, 3))
+        assertThatCode(() -> MySqlSourceConfigs.fromMap(options).validate(3))
                 .doesNotThrowAnyException();
 
         options.remove("source.a.scan.parallelism");
         assertThat(MySqlSourceConfigs.fromMap(options).sources().get(0).parallelism(-1))
                 .isEqualTo(1);
-        assertThatCode(() -> MySqlSourceConfigs.fromMap(options).validate(true, -1))
+        assertThatCode(() -> MySqlSourceConfigs.fromMap(options).validate(-1))
                 .doesNotThrowAnyException();
     }
 
@@ -397,7 +384,7 @@ class MySqlSourceConfigsTest {
     void testInvalidParallelism(String value) {
         Map<String, String> options = tableOptions();
         options.put("source.a.scan.parallelism", value);
-        assertThatThrownBy(() -> MySqlSourceConfigs.fromMap(options).validate(true, 1))
+        assertThatThrownBy(() -> MySqlSourceConfigs.fromMap(options).validate(1))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("scan.parallelism")
                 .hasMessageNotContaining("sensitive-invalid-value")
@@ -411,7 +398,7 @@ class MySqlSourceConfigsTest {
         options.put("source.b.hostname", "MYSQL-A");
         options.put("source.b.port", "3306");
         options.put("source.b.server-id", "5004-5008");
-        assertThatThrownBy(() -> MySqlSourceConfigs.fromMap(options).validate(true, 1))
+        assertThatThrownBy(() -> MySqlSourceConfigs.fromMap(options).validate(1))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("'a' and 'b'")
                 .hasMessageContaining("overlapping 'server-id'")
@@ -420,7 +407,7 @@ class MySqlSourceConfigsTest {
                 .hasMessageNotContaining("shared-password");
 
         options.put("source.b.server-id", "5005-5008");
-        assertThatCode(() -> MySqlSourceConfigs.fromMap(options).validate(true, 1))
+        assertThatCode(() -> MySqlSourceConfigs.fromMap(options).validate(1))
                 .doesNotThrowAnyException();
     }
 
@@ -429,12 +416,12 @@ class MySqlSourceConfigsTest {
         Map<String, String> options = tableOptions();
         options.put("source.b.hostname", "mysql-b");
         options.put("source.b.server-id", "5001");
-        assertThatCode(() -> MySqlSourceConfigs.fromMap(options).validate(true, 1))
+        assertThatCode(() -> MySqlSourceConfigs.fromMap(options).validate(1))
                 .doesNotThrowAnyException();
 
         options.put("source.b.hostname", "mysql-a");
         options.put("source.b.port", "3307");
-        assertThatCode(() -> MySqlSourceConfigs.fromMap(options).validate(true, 1))
+        assertThatCode(() -> MySqlSourceConfigs.fromMap(options).validate(1))
                 .doesNotThrowAnyException();
     }
 
@@ -443,7 +430,7 @@ class MySqlSourceConfigsTest {
     void testInvalidPortDoesNotExposeValues(String value) {
         Map<String, String> options = tableOptions();
         options.put("source.a.port", value);
-        assertThatThrownBy(() -> MySqlSourceConfigs.fromMap(options).validate(true, 1))
+        assertThatThrownBy(() -> MySqlSourceConfigs.fromMap(options).validate(1))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("port")
                 .hasMessageNotContaining("sensitive-invalid-value")

@@ -52,8 +52,8 @@ public class MySqlSyncDatabaseActionFactory
     @Override
     public Optional<Action> create(MultipleParameterToolAdapter params) {
         if (params.has(MYSQL_CONF)) {
-            MySqlSourceConfigs.validateCliOptions(
-                    params.getMultiParameter(MYSQL_CONF),
+            MySqlSourceConfigs.rejectDatabaseCliOptions(params.getMultiParameter(MYSQL_CONF));
+            MySqlSourceConfigs.rejectDatabaseCliOptions(
                     params.getMultiParameter(params.fallback(MYSQL_CONF)));
         }
         return super.create(params);
@@ -80,10 +80,10 @@ public class MySqlSyncDatabaseActionFactory
     public void printHelp() {
         System.out.println(
                 "Action \"mysql_sync_database\" creates a streaming job "
-                        + "with one or more Flink MySQL CDC sources and Paimon table sinks "
-                        + "to synchronize MySQL databases into one Paimon database.\n"
+                        + "with a Flink MySQL CDC source and multiple Paimon table sinks "
+                        + "to synchronize a whole MySQL database into one Paimon database.\n"
                         + "Only MySQL tables with primary keys will be considered. "
-                        + "Use combined mode to include newly created MySQL tables without restarting.");
+                        + "Newly created MySQL tables after the job starts will not be included.");
         System.out.println();
 
         System.out.println("Syntax:");
@@ -156,35 +156,12 @@ public class MySqlSyncDatabaseActionFactory
         System.out.println(
                 "'hostname', 'username', 'password' and 'database-name' "
                         + "are required configurations, others are optional. "
-                        + "'database-name' supports a regular expression to select databases "
-                        + "within the configured MySQL instance.");
+                        + "Note that 'database-name' should be the exact name "
+                        + "of the MySQL database you want to synchronize. "
+                        + "It can't be a regular expression.");
         System.out.println(
                 "For a complete list of supported configurations, "
                         + "see https://nightlies.apache.org/flink/flink-cdc-docs-release-3.1/docs/connectors/flink-sources/mysql-cdc/#connector-options");
-        System.out.println();
-
-        System.out.println("Multiple MySQL instances:");
-        System.out.println(
-                "Use --mysql_conf source.<source-id>.<option>=<value> for each named source. "
-                        + "Unprefixed options are shared defaults, and named options override them. "
-                        + "Each named source requires its own hostname and a configured server-id. For example, "
-                        + "source.shard_a.hostname=mysql-a and source.shard_b.hostname=mysql-b.");
-        System.out.println(
-                "The source-id is a stable logical identity used for operator UIDs and source_id metadata. "
-                        + "Keep source IDs and their database identities unchanged when restoring state. "
-                        + "source.<source-id>.scan.parallelism sets the parallelism of one source.");
-        System.out.println(
-                "multi-source.key-mode=isolated (the default for named sources) adds source_id, "
-                        + "database_name and table_name to the output schema and primary key. "
-                        + "Use multi-source.key-mode=global only when business primary keys are unique "
-                        + "across every source table. Different MySQL instances have no shared event order.");
-        System.out.println(
-                "Named database synchronization requires --merge_shards true and "
-                        + "--sync_primary_keys_from_source_schema true. "
-                        + "--table_prefix_db, --table_suffix_db and --computed_column are not supported "
-                        + "for named database synchronization. Every source must have at least one "
-                        + "compatible primary-key table after filtering. --ignore_incompatible true "
-                        + "excludes all shards mapped to an incompatible target table.");
         System.out.println();
 
         System.out.println("Paimon catalog and table sink conf syntax:");
@@ -208,26 +185,6 @@ public class MySqlSyncDatabaseActionFactory
                         + "    --catalog_conf uri=thrift://hive-metastore:9083 \\\n"
                         + "    --table_conf bucket=4 \\\n"
                         + "    --table_conf changelog-producer=input \\\n"
-                        + "    --table_conf sink.parallelism=4");
-        System.out.println();
-        System.out.println("Example with two independent MySQL instances:");
-        System.out.println(
-                "  mysql_sync_database \\\n"
-                        + "    --warehouse hdfs:///path/to/warehouse \\\n"
-                        + "    --database test_db \\\n"
-                        + "    --mysql_conf username=root \\\n"
-                        + "    --mysql_conf password=123456 \\\n"
-                        + "    --mysql_conf database-name='source_db_.*' \\\n"
-                        + "    --mysql_conf server-time-zone=UTC \\\n"
-                        + "    --mysql_conf source.shard_a.hostname=mysql-a \\\n"
-                        + "    --mysql_conf source.shard_a.server-id=5400-5403 \\\n"
-                        + "    --mysql_conf source.shard_a.scan.parallelism=2 \\\n"
-                        + "    --mysql_conf source.shard_b.hostname=mysql-b \\\n"
-                        + "    --mysql_conf source.shard_b.server-id=6400-6403 \\\n"
-                        + "    --mysql_conf source.shard_b.scan.parallelism=1 \\\n"
-                        + "    --mysql_conf multi-source.key-mode=isolated \\\n"
-                        + "    --mode combined \\\n"
-                        + "    --table_conf bucket=4 \\\n"
                         + "    --table_conf sink.parallelism=4");
     }
 }

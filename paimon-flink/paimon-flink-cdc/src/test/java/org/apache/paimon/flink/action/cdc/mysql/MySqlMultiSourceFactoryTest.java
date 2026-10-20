@@ -26,14 +26,16 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.apache.paimon.flink.action.cdc.CdcActionCommonUtils.MYSQL_CONF;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-/** CLI safeguards for the MySQL table and database action factories. */
+/** CLI safeguards for named MySQL table sources and the legacy database action. */
 class MySqlMultiSourceFactoryTest {
 
     @ParameterizedTest
@@ -133,8 +135,41 @@ class MySqlMultiSourceFactoryTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"--mysql_conf", "--mysql-conf"})
+    void testDatabaseActionRejectsNamedCliOptions(String flag) {
+        MultipleParameterToolAdapter params =
+                new MultipleParameterToolAdapter(new String[] {flag, "source.a.hostname=mysql-a"});
+        assertThatThrownBy(() -> new MySqlSyncDatabaseActionFactory().create(params))
+                .hasMessageContaining("supported only by mysql_sync_table");
+    }
+
+    @Test
+    void testDatabaseActionRejectsNamedOptionsHiddenByFallback() {
+        MultipleParameterToolAdapter params =
+                new MultipleParameterToolAdapter(
+                        new String[] {
+                            "--mysql_conf", "hostname=mysql-a",
+                            "--mysql-conf", "source.b.hostname=mysql-b"
+                        });
+        assertThatThrownBy(() -> new MySqlSyncDatabaseActionFactory().create(params))
+                .hasMessageContaining("supported only by mysql_sync_table");
+    }
+
+    @Test
+    void testDatabaseApiRejectsMultiSourceOptionsBeforeCatalogCreation() {
+        for (String key : new String[] {"source.a.hostname", "multi-source.key-mode"}) {
+            Map<String, String> options = new HashMap<>();
+            options.put("hostname", "legacy-host");
+            options.put(key, "sensitive-value");
+            assertThatThrownBy(
+                            () -> new MySqlSyncDatabaseAction("ods", Collections.emptyMap(), options))
+                    .hasMessageContaining("supported only by mysql_sync_table")
+                    .hasMessageNotContaining("sensitive-value");
+        }
+    }
+
     private static List<ActionFactory> factories() {
-        return Arrays.asList(
-                new MySqlSyncTableActionFactory(), new MySqlSyncDatabaseActionFactory());
+        return Collections.singletonList(new MySqlSyncTableActionFactory());
     }
 }

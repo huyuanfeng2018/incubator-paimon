@@ -37,6 +37,7 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.datastream.DataStream;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Pattern;
@@ -79,6 +80,7 @@ import static org.apache.paimon.utils.Preconditions.checkArgument;
 public class MySqlSyncTableAction extends SyncTableActionBase {
 
     private final MySqlSourceConfigs mySqlSources;
+    private final Map<String, Map<Identifier, Schema>> discoveredSchemas = new LinkedHashMap<>();
 
     public MySqlSyncTableAction(
             String database,
@@ -108,7 +110,7 @@ public class MySqlSyncTableAction extends SyncTableActionBase {
             super.validateSourceOptions();
             return;
         }
-        mySqlSources.validate(true, env.getParallelism());
+        mySqlSources.validate(env.getParallelism());
         validateRuntimeExecutionMode();
         checkArgument(
                 syncPKeysFromSourceSchema,
@@ -127,6 +129,7 @@ public class MySqlSyncTableAction extends SyncTableActionBase {
         Schema sourceSchema = retrieveSchema();
         computedColumns = buildComputedColumns(computedColumnArgs, sourceSchema.fields());
         Schema expected = buildPaimonSchema(sourceSchema);
+        MySqlTableSchemaValidator.validateTargetKeys(sourceSchema, expected, caseSensitive);
         Identifier identifier = Identifier.create(database, table);
         try {
             FileStoreTable existing = (FileStoreTable) catalog.getTable(identifier);
@@ -147,6 +150,7 @@ public class MySqlSyncTableAction extends SyncTableActionBase {
 
     @Override
     protected Schema retrieveSchema() throws Exception {
+        discoveredSchemas.clear();
         JdbcSchemasInfo allSchemas = new JdbcSchemasInfo();
         for (MySqlSourceConfigs.SourceConfig source : mySqlSources.sources()) {
             JdbcSchemasInfo schemas;
@@ -163,9 +167,12 @@ public class MySqlSyncTableAction extends SyncTableActionBase {
                                 + "'. Check its connectivity and matching primary-key tables.",
                         e);
             }
+            Map<Identifier, Schema> physicalSchemas = new LinkedHashMap<>();
+            discoveredSchemas.put(source.id(), physicalSchemas);
             // Source IDs are diagnostic labels here, never part of the physical CDC table filter.
             for (JdbcSchemasInfo.JdbcSchemaInfo schema : schemas.pkTables()) {
                 Identifier sourceTable = schema.identifier();
+                physicalSchemas.put(sourceTable, schema.schema());
                 Identifier diagnosticId =
                         mySqlSources.isNamed()
                                 ? Identifier.create(
@@ -197,11 +204,10 @@ public class MySqlSyncTableAction extends SyncTableActionBase {
         DataStream<RichCdcMultiplexRecord> input = null;
         for (MySqlSourceConfigs.SourceConfig source : mySqlSources.sources()) {
             Configuration config = source.config();
-            String tableList =
-                    String.format(
-                            "(%s)\\.(%s)",
-                            config.get(MySqlSourceOptions.DATABASE_NAME),
-                            config.get(MySqlSourceOptions.TABLE_NAME));
+            MySqlTableSchemaValidator validator =
+                    new MySqlTableSchemaValidator(
+                            source.id(), discoveredSchemas.get(source.id()), caseSensitive);
+            String tableList = validator.tableList();
             DataStream<RichCdcMultiplexRecord> branch =
                     buildDataStreamSource(
                                     MySqlActionUtils.buildMySqlSource(
@@ -216,7 +222,8 @@ public class MySqlSyncTableAction extends SyncTableActionBase {
                                             computedColumns,
                                             typeMapping,
                                             metadataConverters,
-                                            caseSensitive))
+                                            caseSensitive)
+                                            .withTableSchemaValidator(validator))
                             .name("Parse MySQL [" + source.id() + "]")
                             .uid("mysql-parser-" + source.id())
                             .setParallelism(source.parallelism(env.getParallelism()));
