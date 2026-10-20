@@ -112,7 +112,15 @@ public class RichCdcMultiplexRecordEventParser implements EventParser<RichCdcMul
 
     @Override
     public CdcSchema parseSchemaChange() {
-        return shouldSynchronizeCurrentTable ? currentParser.parseSchemaChange() : null;
+        if (!shouldSynchronizeCurrentTable) {
+            return null;
+        }
+        if (schemaBuilder != null && schemaBuilder.isTargetSchemaValidationEnabled()) {
+            // parseNewTable may be skipped for an existing target. Validate the physical
+            // schema before RichEventParser drops primary-key information from schema changes.
+            schemaBuilder.validateTargetSchema(record, parseTableName());
+        }
+        return currentParser.parseSchemaChange();
     }
 
     @Override

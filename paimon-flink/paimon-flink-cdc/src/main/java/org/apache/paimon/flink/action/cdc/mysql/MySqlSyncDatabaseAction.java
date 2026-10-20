@@ -487,7 +487,8 @@ public class MySqlSyncDatabaseAction extends SyncDatabaseActionBase {
         NewTableSchemaBuilder schemaBuilder = super.newTableSchemaBuilder();
         return sourceConfigs.isNamed()
                 ? MySqlMultiSourceSupport.withPrimaryKeyMode(
-                        schemaBuilder, sourceConfigs.isolatePrimaryKeys())
+                                schemaBuilder, sourceConfigs.isolatePrimaryKeys())
+                        .withTargetSchemaValidation(database, catalogLoader())
                 : schemaBuilder;
     }
 
