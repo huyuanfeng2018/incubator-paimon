@@ -261,6 +261,111 @@ You can set `--merge_shards false` to prevent merging shards. The synchronized t
 to avoid potential name conflict.
 {{< /hint >}}
 
+## Synchronizing Multiple MySQL Instances
+
+Both `mysql_sync_table` and `mysql_sync_database` accept named MySQL instances through
+`--mysql_conf source.<id>.<option>=<value>`. Each instance has an independent connection,
+CDC Source, parser, startup position, and source state within the same Flink job.
+Options without a source prefix are shared defaults, and instance options override them.
+Duplicate named option keys are rejected. Use either `--mysql_conf` or its legacy
+spelling `--mysql-conf` consistently; mixing both is rejected for named sources.
+Configure `hostname` separately for every instance; a shared `hostname` cannot be mixed
+with named sources. Source IDs may contain letters, digits, underscores, and hyphens.
+
+For example, synchronize shards from two independent instances into one Paimon table:
+
+```bash
+<FLINK_HOME>/bin/flink run -p 2 \
+    /path/to/paimon-flink-action-{{< version >}}.jar \
+    mysql_sync_table \
+    --warehouse hdfs:///path/to/warehouse \
+    --database ods \
+    --table orders \
+    --mysql_conf username=cdc_reader \
+    --mysql_conf "password=${MYSQL_CDC_PASSWORD}" \
+    --mysql_conf 'database-name=trade_.*' \
+    --mysql_conf 'table-name=orders_.*' \
+    --mysql_conf server-time-zone=Asia/Shanghai \
+    --mysql_conf source.shard_a.hostname=mysql-a.example.internal \
+    --mysql_conf source.shard_a.port=3306 \
+    --mysql_conf source.shard_a.server-id=5400-5403 \
+    --mysql_conf source.shard_a.scan.parallelism=1 \
+    --mysql_conf source.shard_b.hostname=mysql-b.example.internal \
+    --mysql_conf source.shard_b.port=3306 \
+    --mysql_conf source.shard_b.server-id=5500-5503 \
+    --mysql_conf source.shard_b.scan.parallelism=2 \
+    --table_conf bucket=2
+```
+
+Each named instance needs a `server-id` or range containing at least as many IDs as its
+`scan.parallelism`. The default source parallelism is the job parallelism, or 1 when it
+is unset. Overlapping ranges on the same configured hostname and port are rejected.
+The bundled CDC connector represents server IDs as signed Java integers, so the maximum
+supported ID is `2147483647`. This validation does not detect DNS aliases or IDs used by
+other jobs. Configure `scan.startup.specific-offset.*` independently for each instance;
+these options cannot be shared defaults.
+
+### Primary keys and source identity
+
+Named mode defaults to `--mysql_conf multi-source.key-mode=isolated`. It adds three
+non-null string metadata columns, `source_id`, `database_name`, and `table_name`, and
+prefixes the resolved business primary key with these columns. For a source key `id`,
+the target key is `(source_id, database_name, table_name, id)`. Identical IDs in different
+instances or physical shards therefore remain separate records. Source IDs are logical,
+stable identifiers; changing one changes both the stored identity and the source UID.
+
+Physical or computed columns conflicting with these metadata names are rejected. An
+existing target must have matching actual primary keys and partition keys, as well as
+a compatible schema. Adding an ordinary metadata column to a table whose primary key
+is still `id` is insufficient. Use a new target or an explicit migration when changing
+key modes.
+
+Set `--mysql_conf multi-source.key-mode=global` only when the business keys are globally
+unique across all participating physical tables, or when overlapping keys deliberately
+represent the same logical record. This mode preserves the business keys and does not
+automatically add identity metadata. Concurrent updates from separate MySQL instances
+have no global transaction order or timestamp-based conflict resolution provided by
+this feature.
+
+### Database synchronization
+
+For `mysql_sync_database`, use the same named options, omit `mysql_conf table-name`,
+and select tables through `--including_tables` and `--excluding_tables`. Named database
+synchronization requires `--merge_shards true`; both `--mode divided` and `--mode combined`
+are supported. Tables are grouped by their final names after `table_mapping`,
+`table_prefix`, and `table_suffix` are applied. Exclusions are tracked per instance.
+When `--ignore_incompatible true` is set, a group incompatible with an existing Paimon
+target is excluded as a whole, including later shards mapped to that rejected target.
+Schemas that cannot be merged between source shards still fail startup. Every configured instance must retain at least one eligible primary-key table.
+
+Named database mode does not support `--table_prefix_db`, `--table_suffix_db`, or
+`--computed_column`. Named modes require `--sync_primary_keys_from_source_schema true`.
+In combined mode, newly created target tables receive the same identity metadata and
+primary-key policy. A newly discovered shard mapped to an existing target must have
+compatible business keys and schema. The existing catalog disallows changing the types
+of target primary-key columns; this feature retains that restriction. Compatible
+widening of non-key columns continues to use the existing schema evolution mechanism.
+
+### Ordering and recovery
+
+Each source and its parser use equal parallelism with forward edges. Parsed records
+are then partitioned by the final target table and typed target primary key before
+entering the existing sink. Targets unknown during job construction are routed by
+whole table for the duration of that run, which keeps their event order but limits that
+routing stage to one partition per new table.
+
+All sources participate in the same job checkpoint, while retaining independent source
+positions. One slow or failed instance can affect the whole job. This does not create
+a transactionally consistent snapshot or event order across separate MySQL instances.
+
+Named sources are sorted by their stable IDs and use explicit source/parser UIDs.
+Restoring a savepoint with the same source identities and key mode supports reordered
+configuration declarations. Adding, removing, or renaming sources, changing key modes,
+migrating an existing legacy job, and rescaling during snapshots require separate
+migration validation. When rebuilding a graph whose routing has changed, use an aligned
+checkpoint or savepoint; restoration from an unaligned checkpoint containing old channel
+state is not covered. Commands without named options retain the legacy single-source path.
+
 ## FAQ
 
 1. Chinese characters in records ingested from MySQL are garbled.

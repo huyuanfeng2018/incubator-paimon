@@ -41,6 +41,7 @@ import static org.apache.paimon.utils.Preconditions.checkNotNull;
 public enum CdcMetadataProcessor {
     MYSQL_METADATA_PROCESSOR(
             SyncJobHandler.SourceType.MYSQL,
+            new CdcMetadataConverter.SourceIdConverter("default"),
             new CdcMetadataConverter.DatabaseNameConverter(),
             new CdcMetadataConverter.TableNameConverter(),
             new CdcMetadataConverter.OpTsConverter()),

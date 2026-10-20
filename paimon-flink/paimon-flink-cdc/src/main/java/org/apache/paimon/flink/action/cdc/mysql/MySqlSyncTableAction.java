@@ -18,6 +18,7 @@
 
 package org.apache.paimon.flink.action.cdc.mysql;
 
+import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.flink.action.Action;
 import org.apache.paimon.flink.action.cdc.CdcSourceRecord;
@@ -26,18 +27,22 @@ import org.apache.paimon.flink.action.cdc.SyncTableActionBase;
 import org.apache.paimon.flink.action.cdc.schema.JdbcSchemasInfo;
 import org.apache.paimon.flink.action.cdc.schema.JdbcTableInfo;
 import org.apache.paimon.flink.action.cdc.watermark.CdcTimestampExtractor;
+import org.apache.paimon.flink.sink.cdc.RichCdcMultiplexRecord;
 import org.apache.paimon.schema.Schema;
+import org.apache.paimon.table.FileStoreTable;
 
 import org.apache.flink.cdc.connectors.mysql.source.MySqlSource;
 import org.apache.flink.cdc.connectors.mysql.source.config.MySqlSourceOptions;
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.streaming.api.datastream.DataStream;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.function.Predicate;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
+import static org.apache.paimon.flink.action.cdc.ComputedColumnUtils.buildComputedColumns;
 import static org.apache.paimon.utils.Preconditions.checkArgument;
 
 /**
@@ -73,24 +78,156 @@ import static org.apache.paimon.utils.Preconditions.checkArgument;
  */
 public class MySqlSyncTableAction extends SyncTableActionBase {
 
-    private JdbcSchemasInfo mySqlSchemasInfo;
+    private final MySqlSourceConfigs mySqlSources;
 
     public MySqlSyncTableAction(
             String database,
             String table,
             Map<String, String> catalogConfig,
             Map<String, String> mySqlConfig) {
-        super(database, table, catalogConfig, mySqlConfig, SyncJobHandler.SourceType.MYSQL);
+        this(database, table, catalogConfig, MySqlSourceConfigs.fromMap(mySqlConfig));
+    }
+
+    private MySqlSyncTableAction(
+            String database,
+            String table,
+            Map<String, String> catalogConfig,
+            MySqlSourceConfigs mySqlSources) {
+        super(
+                database,
+                table,
+                catalogConfig,
+                mySqlSources.firstConfig().toMap(),
+                SyncJobHandler.SourceType.MYSQL);
+        this.mySqlSources = mySqlSources;
+    }
+
+    @Override
+    protected void validateSourceOptions() {
+        if (!mySqlSources.isNamed()) {
+            super.validateSourceOptions();
+            return;
+        }
+        mySqlSources.validate(true, env.getParallelism());
+        validateRuntimeExecutionMode();
+        checkArgument(
+                syncPKeysFromSourceSchema,
+                "Named MySQL sources require sync_primary_keys_from_source_schema=true.");
+        metadataConverters =
+                MySqlMultiSourceSupport.metadataConverters(mySqlSources, metadataConverters);
+    }
+
+    @Override
+    protected void beforeBuildingSourceSink() throws Exception {
+        if (!mySqlSources.isNamed()) {
+            super.beforeBuildingSourceSink();
+            return;
+        }
+        // Discover and validate every instance before changing the target table.
+        Schema sourceSchema = retrieveSchema();
+        computedColumns = buildComputedColumns(computedColumnArgs, sourceSchema.fields());
+        Schema expected = buildPaimonSchema(sourceSchema);
+        Identifier identifier = Identifier.create(database, table);
+        try {
+            FileStoreTable existing = (FileStoreTable) catalog.getTable(identifier);
+            MySqlMultiSourceSupport.validateExistingTable(
+                    existing.schema(), expected, identifier.getFullName());
+            fileStoreTable = alterTableOptions(identifier, existing);
+        } catch (Catalog.TableNotExistException e) {
+            catalog.createTable(identifier, expected, false);
+            fileStoreTable = (FileStoreTable) catalog.getTable(identifier);
+        }
+    }
+
+    @Override
+    protected Schema buildPaimonSchema(Schema retrievedSchema) {
+        return MySqlMultiSourceSupport.applyPrimaryKeyMode(
+                super.buildPaimonSchema(retrievedSchema), mySqlSources.isolatePrimaryKeys());
     }
 
     @Override
     protected Schema retrieveSchema() throws Exception {
-        this.mySqlSchemasInfo =
-                MySqlActionUtils.getMySqlTableInfos(
-                        cdcSourceConfig, monitorTablePredication(), new ArrayList<>(), typeMapping);
-        validateMySqlTableInfos(mySqlSchemasInfo);
-        JdbcTableInfo tableInfo = mySqlSchemasInfo.mergeAll();
+        JdbcSchemasInfo allSchemas = new JdbcSchemasInfo();
+        for (MySqlSourceConfigs.SourceConfig source : mySqlSources.sources()) {
+            JdbcSchemasInfo schemas;
+            try {
+                schemas = retrieveSchemas(source.config());
+                validateMySqlTableInfos(schemas);
+            } catch (Exception e) {
+                if (!mySqlSources.isNamed()) {
+                    throw e;
+                }
+                throw new IllegalArgumentException(
+                        "Cannot discover MySQL source '"
+                                + source.id()
+                                + "'. Check its connectivity and matching primary-key tables.",
+                        e);
+            }
+            // Source IDs are diagnostic labels here, never part of the physical CDC table filter.
+            for (JdbcSchemasInfo.JdbcSchemaInfo schema : schemas.pkTables()) {
+                Identifier sourceTable = schema.identifier();
+                Identifier diagnosticId =
+                        mySqlSources.isNamed()
+                                ? Identifier.create(
+                                        source.id() + ":" + sourceTable.getDatabaseName(),
+                                        sourceTable.getObjectName())
+                                : sourceTable;
+                allSchemas.addSchema(diagnosticId, schema.schema());
+            }
+        }
+        JdbcTableInfo tableInfo = allSchemas.mergeAll();
         return tableInfo.schema();
+    }
+
+    /** Kept separate from graph construction to allow discovery to be validated independently. */
+    protected JdbcSchemasInfo retrieveSchemas(Configuration config) throws Exception {
+        Pattern tablePattern = Pattern.compile(config.get(MySqlSourceOptions.TABLE_NAME));
+        return MySqlActionUtils.getMySqlTableInfos(
+                config,
+                tableName -> tablePattern.matcher(tableName).matches(),
+                new ArrayList<>(),
+                typeMapping);
+    }
+
+    @Override
+    protected DataStream<RichCdcMultiplexRecord> buildInput() {
+        if (!mySqlSources.isNamed()) {
+            return super.buildInput();
+        }
+        DataStream<RichCdcMultiplexRecord> input = null;
+        for (MySqlSourceConfigs.SourceConfig source : mySqlSources.sources()) {
+            Configuration config = source.config();
+            String tableList =
+                    String.format(
+                            "(%s)\\.(%s)",
+                            config.get(MySqlSourceOptions.DATABASE_NAME),
+                            config.get(MySqlSourceOptions.TABLE_NAME));
+            DataStream<RichCdcMultiplexRecord> branch =
+                    buildDataStreamSource(
+                                    MySqlActionUtils.buildMySqlSource(
+                                            config, tableList, typeMapping),
+                                    "MySQL Source [" + source.id() + "]")
+                            .uid("mysql-source-" + source.id())
+                            .setParallelism(source.parallelism(env.getParallelism()))
+                            .forward()
+                            .flatMap(
+                                    MySqlMultiSourceSupport.recordParser(
+                                            source,
+                                            computedColumns,
+                                            typeMapping,
+                                            metadataConverters,
+                                            caseSensitive))
+                            .name("Parse MySQL [" + source.id() + "]")
+                            .uid("mysql-parser-" + source.id())
+                            .setParallelism(source.parallelism(env.getParallelism()));
+            input = input == null ? branch : input.union(branch);
+        }
+        return MySqlMultiSourceSupport.routeTableRecords(
+                input,
+                table,
+                fileStoreTable.schema().primaryKeysFields(),
+                caseSensitive,
+                env.getParallelism());
     }
 
     @Override
@@ -121,13 +258,5 @@ public class MySqlSyncTableAction extends SyncTableActionBase {
         checkArgument(
                 !mySqlSchemasInfo.pkTables().isEmpty(),
                 "No table satisfies the given database name and table name.");
-    }
-
-    private Predicate<String> monitorTablePredication() {
-        return tableName -> {
-            Pattern tableNamePattern =
-                    Pattern.compile(cdcSourceConfig.get(MySqlSourceOptions.TABLE_NAME));
-            return tableNamePattern.matcher(tableName).matches();
-        };
     }
 }

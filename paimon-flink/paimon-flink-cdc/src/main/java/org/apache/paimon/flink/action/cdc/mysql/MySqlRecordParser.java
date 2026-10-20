@@ -18,6 +18,7 @@
 
 package org.apache.paimon.flink.action.cdc.mysql;
 
+import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.flink.action.cdc.CdcMetadataConverter;
 import org.apache.paimon.flink.action.cdc.CdcSourceRecord;
 import org.apache.paimon.flink.action.cdc.ComputedColumn;
@@ -31,6 +32,7 @@ import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.RowKind;
 import org.apache.paimon.utils.JsonSerdeUtil;
 import org.apache.paimon.utils.Preconditions;
+import org.apache.paimon.utils.SerializablePredicate;
 
 import org.apache.paimon.shade.jackson2.com.fasterxml.jackson.core.type.TypeReference;
 import org.apache.paimon.shade.jackson2.com.fasterxml.jackson.databind.DeserializationFeature;
@@ -51,6 +53,8 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.util.Collector;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import javax.annotation.Nullable;
 
 import java.time.ZoneId;
 import java.util.ArrayList;
@@ -85,17 +89,29 @@ public class MySqlRecordParser implements FlatMapFunction<CdcSourceRecord, RichC
     private String currentTable;
     private String databaseName;
     private final CdcMetadataConverter[] metadataConverters;
+    private final boolean caseSensitive;
+    @Nullable private SerializablePredicate<Identifier> tableFilter;
 
-    private final Set<String> nonPkTables = new HashSet<>();
+    private final Set<Identifier> nonPkTables = new HashSet<>();
 
     public MySqlRecordParser(
             Configuration mySqlConfig,
             List<ComputedColumn> computedColumns,
             TypeMapping typeMapping,
             CdcMetadataConverter[] metadataConverters) {
+        this(mySqlConfig, computedColumns, typeMapping, metadataConverters, true);
+    }
+
+    public MySqlRecordParser(
+            Configuration mySqlConfig,
+            List<ComputedColumn> computedColumns,
+            TypeMapping typeMapping,
+            CdcMetadataConverter[] metadataConverters,
+            boolean caseSensitive) {
         this.computedColumns = computedColumns;
         this.typeMapping = typeMapping;
         this.metadataConverters = metadataConverters;
+        this.caseSensitive = caseSensitive;
         objectMapper
                 .configure(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS, true)
                 .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
@@ -115,12 +131,23 @@ public class MySqlRecordParser implements FlatMapFunction<CdcSourceRecord, RichC
                         : ZoneId.of(stringifyServerTimeZone);
     }
 
+    /** Filters physical source tables before interpreting their schema or row values. */
+    public MySqlRecordParser withTableFilter(SerializablePredicate<Identifier> tableFilter) {
+        this.tableFilter = tableFilter;
+        return this;
+    }
+
     @Override
     public void flatMap(CdcSourceRecord rawEvent, Collector<RichCdcMultiplexRecord> out)
             throws Exception {
         root = objectMapper.readValue((String) rawEvent.getValue(), DebeziumEvent.class);
         currentTable = root.payload().source().get(AbstractSourceInfo.TABLE_NAME_KEY).asText();
         databaseName = root.payload().source().get(AbstractSourceInfo.DATABASE_NAME_KEY).asText();
+
+        if (tableFilter != null
+                && !tableFilter.test(Identifier.create(databaseName, currentTable))) {
+            return;
+        }
 
         if (root.payload().isSchemaChange()) {
             extractSchemaChange().forEach(out::collect);
@@ -159,7 +186,7 @@ public class MySqlRecordParser implements FlatMapFunction<CdcSourceRecord, RichC
                     "Didn't find primary keys from MySQL DDL for table '{}'. "
                             + "This table won't be synchronized.",
                     currentTable);
-            nonPkTables.add(currentTable);
+            nonPkTables.add(Identifier.create(databaseName, currentTable));
             return Collections.emptyList();
         }
 
@@ -177,6 +204,7 @@ public class MySqlRecordParser implements FlatMapFunction<CdcSourceRecord, RichC
         List<Column> columns = table.columns();
 
         for (Column column : columns) {
+            validatePhysicalColumn(column.name());
             DataType dataType =
                     MySqlTypeUtils.toDataType(
                             column.typeExpression(),
@@ -204,7 +232,7 @@ public class MySqlRecordParser implements FlatMapFunction<CdcSourceRecord, RichC
     }
 
     private List<RichCdcMultiplexRecord> extractRecords() {
-        if (nonPkTables.contains(currentTable)) {
+        if (nonPkTables.contains(Identifier.create(databaseName, currentTable))) {
             return Collections.emptyList();
         }
         List<RichCdcMultiplexRecord> records = new ArrayList<>();
@@ -244,6 +272,7 @@ public class MySqlRecordParser implements FlatMapFunction<CdcSourceRecord, RichC
 
         for (Map.Entry<String, DebeziumEvent.Field> field : fields.entrySet()) {
             String fieldName = field.getKey();
+            validatePhysicalColumn(fieldName);
             String debeziumType = field.getValue().type();
             String className = field.getValue().name();
 
@@ -294,6 +323,22 @@ public class MySqlRecordParser implements FlatMapFunction<CdcSourceRecord, RichC
         }
 
         return resultMap;
+    }
+
+    private void validatePhysicalColumn(String name) {
+        for (CdcMetadataConverter converter : metadataConverters) {
+            boolean conflict =
+                    caseSensitive
+                            ? converter.columnName().equals(name)
+                            : converter.columnName().equalsIgnoreCase(name);
+            Preconditions.checkArgument(
+                    !conflict,
+                    "MySQL table '%s.%s' has physical column '%s' which conflicts with CDC metadata. "
+                            + "Rename the physical column or change the metadata configuration.",
+                    databaseName,
+                    currentTable,
+                    name);
+        }
     }
 
     protected RichCdcMultiplexRecord createRecord(RowKind rowKind, Map<String, String> data) {

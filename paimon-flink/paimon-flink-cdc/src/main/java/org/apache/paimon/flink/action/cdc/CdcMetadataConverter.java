@@ -45,6 +45,32 @@ public interface CdcMetadataConverter extends Serializable {
 
     String columnName();
 
+    /** Stable logical identifier of a MySQL source, independent of its network address. */
+    class SourceIdConverter implements CdcMetadataConverter {
+        private static final long serialVersionUID = 1L;
+
+        private final String sourceId;
+
+        public SourceIdConverter(String sourceId) {
+            this.sourceId = sourceId;
+        }
+
+        @Override
+        public String read(JsonNode source) {
+            return sourceId;
+        }
+
+        @Override
+        public DataType dataType() {
+            return DataTypes.STRING().notNull();
+        }
+
+        @Override
+        public String columnName() {
+            return "source_id";
+        }
+    }
+
     /** Name of the database that contain the row. */
     class DatabaseNameConverter implements CdcMetadataConverter {
         private static final long serialVersionUID = 1L;
