@@ -195,7 +195,16 @@ public abstract class SyncDatabaseActionBase extends SynchronizationActionBase {
 
     @Override
     protected EventParser.Factory<RichCdcMultiplexRecord> buildEventParserFactory() {
-        NewTableSchemaBuilder schemaBuilder = newTableSchemaBuilder();
+        NewTableSchemaBuilder schemaBuilder =
+                new NewTableSchemaBuilder(
+                        tableConfig,
+                        caseSensitive,
+                        partitionKeys,
+                        primaryKeys,
+                        requirePrimaryKeys(),
+                        syncPKeysFromSourceSchema,
+                        partitionKeyMultiple,
+                        metadataConverters);
         Pattern tblIncludingPattern = Pattern.compile(includingTables);
         Pattern tblExcludingPattern =
                 excludingTables == null ? null : Pattern.compile(excludingTables);
@@ -225,18 +234,6 @@ public abstract class SyncDatabaseActionBase extends SynchronizationActionBase {
                         dbExcludingPattern,
                         tableNameConverter,
                         createdTables);
-    }
-
-    protected NewTableSchemaBuilder newTableSchemaBuilder() {
-        return new NewTableSchemaBuilder(
-                tableConfig,
-                caseSensitive,
-                partitionKeys,
-                primaryKeys,
-                requirePrimaryKeys(),
-                syncPKeysFromSourceSchema,
-                partitionKeyMultiple,
-                metadataConverters);
     }
 
     protected abstract boolean requirePrimaryKeys();

@@ -18,7 +18,6 @@
 
 package org.apache.paimon.flink.action.cdc.mysql;
 
-import org.apache.paimon.flink.action.cdc.TableNameConverter;
 import org.apache.paimon.flink.action.cdc.mysql.MySqlMultiSourceSupport.RecordKeySelector;
 import org.apache.paimon.flink.sink.cdc.CdcRecord;
 import org.apache.paimon.flink.sink.cdc.CdcSchema;
@@ -33,7 +32,6 @@ import org.junit.jupiter.api.Test;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -71,26 +69,6 @@ class MySqlMultiSourceRoutingTest {
         assertThat(selector.getKey(before)).isEqualTo(selector.getKey(after));
         assertThat(selector.getKey(record("orders_0", "id", "2")))
                 .isNotEqualTo(selector.getKey(before));
-    }
-
-    @Test
-    void testDatabaseRoutesByFinalMappedTableName() {
-        Map<String, String> mapping = new HashMap<>();
-        mapping.put("orders_0", "ods_orders_cdc");
-        mapping.put("orders_1", "ods_orders_cdc");
-        TableNameConverter converter = new TableNameConverter(true, true, "ods_", "_cdc", mapping);
-        Map<String, List<DataField>> keys = new HashMap<>();
-        List<DataField> id = Collections.singletonList(new DataField(0, "id", DataTypes.INT()));
-        keys.put("ods_orders_cdc", id);
-        keys.put("ods_customers_cdc", id);
-        RecordKeySelector selector = new RecordKeySelector(null, converter, keys, true);
-
-        Integer expected = selector.getKey(record("orders", "id", "7"));
-        assertThat(selector.getKey(record("orders_0", "id", "7"))).isEqualTo(expected);
-        assertThat(selector.getKey(record("other_db", "orders_1", RowKind.DELETE, "id", "7")))
-                .isEqualTo(expected);
-        assertThat(selector.getKey(record("customers", "id", "7"))).isNotEqualTo(expected);
-        assertThat(selector.getKey(record("orders_0", "id", "8"))).isNotEqualTo(expected);
     }
 
     @Test
@@ -159,35 +137,12 @@ class MySqlMultiSourceRoutingTest {
     void testCaseInsensitiveTableAndFieldNames() {
         RecordKeySelector selector =
                 new RecordKeySelector(
-                        null,
-                        new TableNameConverter(false),
-                        Collections.singletonMap(
-                                "orders",
-                                Collections.singletonList(new DataField(0, "id", DataTypes.INT()))),
-                        false);
+                        "orders", Collections.singletonList(new DataField(0, "id", DataTypes.INT())), false);
 
         assertThat(selector.getKey(record("ORDERS", "ID", "42", "VALUE", "before")))
                 .isEqualTo(selector.getKey(record("orders", "id", "42", "value", "after")));
         assertThat(selector.getKey(record("ORDERS", "ID", "43")))
                 .isNotEqualTo(selector.getKey(record("orders", "id", "42")));
-    }
-
-    @Test
-    void testRuntimeTablesKeepWholeTableRouting() {
-        RecordKeySelector selector =
-                new RecordKeySelector(
-                        null,
-                        new TableNameConverter(true),
-                        Collections.singletonMap(
-                                "orders",
-                                Collections.singletonList(new DataField(0, "id", DataTypes.INT()))),
-                        true);
-        Integer expected = selector.getKey(record("new_orders", "id", "1", "value", "before"));
-
-        assertThat(selector.getKey(record("new_orders", "id", "2", "value", "after")))
-                .isEqualTo(expected);
-        assertThat(selector.getKey(record("new_orders"))).isEqualTo(expected);
-        assertThat(selector.getKey(record("another_new_table", "id", "1"))).isNotEqualTo(expected);
     }
 
     @Test
@@ -308,15 +263,11 @@ class MySqlMultiSourceRoutingTest {
     void testTypedRoutingSurvivesSerialization() throws Exception {
         RecordKeySelector selector =
                 new RecordKeySelector(
-                        null,
-                        new TableNameConverter(
-                                true, true, "", "", Collections.singletonMap("orders_0", "orders")),
-                        Collections.singletonMap(
-                                "orders",
-                                Arrays.asList(
-                                        new DataField(0, "source_id", DataTypes.STRING()),
-                                        new DataField(1, "id", DataTypes.BINARY(2)),
-                                        new DataField(2, "ts", DataTypes.TIMESTAMP(6)))),
+                        "orders",
+                        Arrays.asList(
+                                new DataField(0, "source_id", DataTypes.STRING()),
+                                new DataField(1, "id", DataTypes.BINARY(2)),
+                                new DataField(2, "ts", DataTypes.TIMESTAMP(6))),
                         true);
         RecordKeySelector restored = InstantiationUtil.clone(selector);
         RichCdcMultiplexRecord record =
@@ -333,8 +284,7 @@ class MySqlMultiSourceRoutingTest {
     }
 
     private static RecordKeySelector tableSelector(DataField... keys) {
-        return new RecordKeySelector(
-                "target", null, Collections.singletonMap("target", Arrays.asList(keys)), true);
+        return new RecordKeySelector("target", Arrays.asList(keys), true);
     }
 
     private static RichCdcMultiplexRecord record(String table, String... fields) {

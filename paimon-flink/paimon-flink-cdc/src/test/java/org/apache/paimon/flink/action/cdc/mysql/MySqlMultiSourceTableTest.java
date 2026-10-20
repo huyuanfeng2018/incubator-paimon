@@ -205,6 +205,19 @@ class MySqlMultiSourceTableTest {
         }
     }
 
+    @Test
+    void testExplicitPrimaryKeysCannotDiscardSourceKeyBeforeTargetCreation() {
+        for (String mode : Arrays.asList("isolated", "global")) {
+            Map<String, String> config = namedConfig();
+            config.put("multi-source.key-mode", mode);
+            TestingAction action = action(config, schemas(), "bad_explicit_" + mode);
+            action.withPrimaryKeys("name");
+            assertThatThrownBy(action::build)
+                    .hasMessageContaining("must retain every physical MySQL primary-key column");
+            assertThat(action.targetExists()).isFalse();
+        }
+    }
+
     private TestingAction action(
             Map<String, String> config, Map<String, Schema> schemas, String name) {
         TestingAction action =

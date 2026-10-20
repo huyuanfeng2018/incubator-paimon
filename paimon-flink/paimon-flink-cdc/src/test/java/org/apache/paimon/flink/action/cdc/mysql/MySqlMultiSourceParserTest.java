@@ -21,12 +21,12 @@ package org.apache.paimon.flink.action.cdc.mysql;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.flink.action.cdc.CdcMetadataConverter;
 import org.apache.paimon.flink.action.cdc.CdcSourceRecord;
-import org.apache.paimon.flink.action.cdc.TableNameConverter;
 import org.apache.paimon.flink.action.cdc.TypeMapping;
 import org.apache.paimon.flink.sink.cdc.CdcRecord;
 import org.apache.paimon.flink.sink.cdc.RichCdcMultiplexRecord;
+import org.apache.paimon.schema.Schema;
+import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.RowKind;
-import org.apache.paimon.utils.InstantiationUtil;
 
 import org.apache.paimon.shade.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.paimon.shade.jackson2.com.fasterxml.jackson.databind.node.ArrayNode;
@@ -120,94 +120,45 @@ class MySqlMultiSourceParserTest {
     }
 
     @Test
-    void testDatabaseFiltersRunBeforeSchemaAndRowValidation() throws Exception {
-        MySqlRecordParser parser =
-                parser("a", "UTC", true)
-                        .withTableFilter(
-                                MySqlMultiSourceSupport.tableFilter(
-                                        "app_.*",
-                                        "app_ignored",
-                                        ".*",
-                                        null,
-                                        Collections.emptyList(),
-                                        Collections.emptySet(),
-                                        new TableNameConverter(true)));
-        for (String db : new String[] {"app_ignored", "outside"}) {
-            ObjectNode event = row(db, "source_id", null, false);
-            ((ArrayNode) event.path("schema").path("fields").get(0).path("fields"))
-                    .addObject()
-                    .put("field", "id")
-                    .put("type", "string");
-            ((ObjectNode) event.path("payload").path("after")).put("id", "not-an-integer");
-
-            // A new excluded database may reuse a known target name with incompatible fields.
-            // Drop it before metadata validation or downstream typed primary-key routing.
-            assertThat(parse(parser, event)).isEmpty();
-            assertThat(parse(parser, ddl(db, "ALTER", true, "source_id"))).isEmpty();
-        }
-
-        assertThat(parse(parser, row("app_live", "id", null, false))).hasSize(1);
-        assertThatThrownBy(() -> parse(parser, row("app_live", "source_id", null, false)))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("conflicts with CDC metadata");
-        assertThatThrownBy(() -> parse(parser, ddl("app_live", "ALTER", true, "source_id")))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("conflicts with CDC metadata");
+    void testTableKeyAlterFailsBeforeAnySchemaEventIsCollected() throws Exception {
+        MySqlRecordParser guarded = guardedParser();
+        assertThat(parse(guarded, ddl("app", "ALTER", true, "id"))).hasSize(1);
+        List<RichCdcMultiplexRecord> output = new ArrayList<>();
+        Collector<RichCdcMultiplexRecord> collector = new Collector<RichCdcMultiplexRecord>() {
+            @Override
+            public void collect(RichCdcMultiplexRecord record) { output.add(record); }
+            @Override
+            public void close() {}
+        };
+        assertThatThrownBy(
+                        () -> guarded.flatMap(
+                                new CdcSourceRecord(MAPPER.writeValueAsString(ddl("app", "ALTER", true, "code"))),
+                                collector))
+                .hasMessageContaining("Primary keys changed");
+        assertThat(output).isEmpty();
     }
 
     @Test
-    void testTableFiltersRunBeforeSchemaAndRowValidation() throws Exception {
-        MySqlRecordParser parser =
-                parser("a", "UTC", true)
-                        .withTableFilter(
-                                MySqlMultiSourceSupport.tableFilter(
-                                        ".*",
-                                        null,
-                                        "orders|payments",
-                                        "orders",
-                                        Collections.emptyList(),
-                                        Collections.emptySet(),
-                                        new TableNameConverter(true)));
-
-        assertThat(parse(parser, row("app", "source_id", null, false))).isEmpty();
-        assertThat(parse(parser, ddl("app", "ALTER", true, "source_id"))).isEmpty();
-        assertThat(parse(parser, withTable(row("app", "source_id", null, false), "outside")))
-                .isEmpty();
-        assertThat(parse(parser, withTable(row("app", "id", null, false), "payments"))).hasSize(1);
+    void testTableKeyDropAndMissingHistoryFailClosed() throws Exception {
+        assertThatThrownBy(() -> parse(guardedParser(), ddl("app", "CREATE", false, "id")))
+                .hasMessageContaining("Primary keys changed");
+        ObjectNode missing = ddl("app", "ALTER", true, "id");
+        ((ObjectNode) missing.path("payload")).remove("historyRecord");
+        assertThatThrownBy(() -> parse(guardedParser(), missing))
+                .hasMessageContaining("Missing MySQL schema history");
     }
 
     @Test
-    void testSourceAndTargetExclusionsSurviveParserSerialization() throws Exception {
-        MySqlRecordParser parser =
-                parser("a", "UTC", true)
-                        .withTableFilter(
-                                MySqlMultiSourceSupport.tableFilter(
-                                        ".*",
-                                        null,
-                                        ".*",
-                                        null,
-                                        Collections.singletonList(
-                                                Identifier.create("app", "orders")),
-                                        Collections.singleton("rejected"),
-                                        new TableNameConverter(
-                                                true,
-                                                true,
-                                                "",
-                                                "",
-                                                Collections.singletonMap("orders_1", "rejected"))));
-        MySqlRecordParser restored = InstantiationUtil.clone(parser);
-
-        assertThat(parse(restored, row("app", "source_id", null, false))).isEmpty();
-        assertThat(parse(restored, ddl("app", "ALTER", true, "source_id"))).isEmpty();
-        assertThat(parse(restored, withTable(row("app", "source_id", null, false), "orders_1")))
-                .isEmpty();
-        assertThat(parse(restored, withTable(row("app", "id", null, false), "payments")))
-                .hasSize(1);
+    void testUndiscoveredTablesCannotEmitRowsWithoutAValidatedSchema() {
+        assertThatThrownBy(() -> parse(guardedParser(), row("other", "id", null, false)))
+                .hasMessageContaining("outside startup discovery");
     }
 
-    private static ObjectNode withTable(ObjectNode event, String table) {
-        ((ObjectNode) event.path("payload").path("source")).put("table", table);
-        return event;
+    private static MySqlRecordParser guardedParser() {
+        Schema physical = Schema.newBuilder().column("id", DataTypes.INT().notNull()).primaryKey("id").build();
+        return parser("a", "UTC", true).withTableSchemaValidator(
+                new MySqlTableSchemaValidator(
+                        "a", Collections.singletonMap(Identifier.create("app", "orders"), physical), true));
     }
 
     private static MySqlRecordParser parser(String id, String zone, boolean caseSensitive) {

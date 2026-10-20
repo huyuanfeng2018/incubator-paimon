@@ -18,36 +18,27 @@
 
 package org.apache.paimon.flink.action.cdc.mysql;
 
-import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.flink.action.cdc.CdcMetadataConverter;
 import org.apache.paimon.flink.action.cdc.ComputedColumn;
-import org.apache.paimon.flink.action.cdc.TableNameConverter;
 import org.apache.paimon.flink.action.cdc.TypeMapping;
 import org.apache.paimon.flink.sink.cdc.CdcRecord;
-import org.apache.paimon.flink.sink.cdc.NewTableSchemaBuilder;
 import org.apache.paimon.flink.sink.cdc.RichCdcMultiplexRecord;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.types.DataField;
-import org.apache.paimon.utils.SerializablePredicate;
 import org.apache.paimon.utils.TypeUtils;
 
 import org.apache.flink.api.common.functions.MapFunction;
 import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.streaming.api.datastream.DataStream;
 
-import javax.annotation.Nullable;
-
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.regex.Pattern;
 
 import static org.apache.paimon.flink.action.cdc.CdcActionCommonUtils.assertSchemaCompatible;
 import static org.apache.paimon.utils.Preconditions.checkArgument;
@@ -139,73 +130,6 @@ final class MySqlMultiSourceSupport {
         assertSchemaCompatible(existing, expected.fields());
     }
 
-    static NewTableSchemaBuilder withPrimaryKeyMode(
-            NewTableSchemaBuilder builder, boolean isolated) {
-        builder.withStrictlyCheckSpecified(true);
-        return isolated ? builder.withPrimaryKeyPrefix(SOURCE_IDENTITY_COLUMNS) : builder;
-    }
-
-    /** Keeps startup and runtime exclusions ahead of metadata validation and typed key routing. */
-    static SerializablePredicate<Identifier> tableFilter(
-            String includingDbs,
-            @Nullable String excludingDbs,
-            String includingTables,
-            @Nullable String excludingTables,
-            List<Identifier> sourceExcludedTables,
-            Set<String> rejectedTargetTables,
-            TableNameConverter tableNameConverter) {
-        return new SourceTableFilter(
-                includingDbs,
-                excludingDbs,
-                includingTables,
-                excludingTables,
-                sourceExcludedTables,
-                rejectedTargetTables,
-                tableNameConverter);
-    }
-
-    private static final class SourceTableFilter implements SerializablePredicate<Identifier> {
-        private static final long serialVersionUID = 1L;
-
-        private final Pattern includingDbs;
-        @Nullable private final Pattern excludingDbs;
-        private final Pattern includingTables;
-        @Nullable private final Pattern excludingTables;
-        private final Set<Identifier> sourceExcludedTables;
-        private final Set<String> rejectedTargetTables;
-        private final TableNameConverter tableNameConverter;
-
-        private SourceTableFilter(
-                String includingDbs,
-                @Nullable String excludingDbs,
-                String includingTables,
-                @Nullable String excludingTables,
-                List<Identifier> sourceExcludedTables,
-                Set<String> rejectedTargetTables,
-                TableNameConverter tableNameConverter) {
-            this.includingDbs = Pattern.compile(includingDbs);
-            this.excludingDbs = excludingDbs == null ? null : Pattern.compile(excludingDbs);
-            this.includingTables = Pattern.compile(includingTables);
-            this.excludingTables =
-                    excludingTables == null ? null : Pattern.compile(excludingTables);
-            this.sourceExcludedTables = new HashSet<>(sourceExcludedTables);
-            this.rejectedTargetTables = new HashSet<>(rejectedTargetTables);
-            this.tableNameConverter = tableNameConverter;
-        }
-
-        @Override
-        public boolean test(Identifier sourceTable) {
-            String database = sourceTable.getDatabaseName();
-            String table = sourceTable.getObjectName();
-            return includingDbs.matcher(database).matches()
-                    && (excludingDbs == null || !excludingDbs.matcher(database).matches())
-                    && includingTables.matcher(table).matches()
-                    && (excludingTables == null || !excludingTables.matcher(table).matches())
-                    && !sourceExcludedTables.contains(sourceTable)
-                    && !rejectedTargetTables.contains(tableNameConverter.convert(sourceTable));
-        }
-    }
-
     static DataStream<RichCdcMultiplexRecord> routeTableRecords(
             DataStream<RichCdcMultiplexRecord> input,
             String target,
@@ -213,22 +137,7 @@ final class MySqlMultiSourceSupport {
             boolean caseSensitive,
             int parallelism) {
         return routeRecords(
-                input,
-                new RecordKeySelector(
-                        target, null, Collections.singletonMap(target, primaryKeys), caseSensitive),
-                parallelism);
-    }
-
-    static DataStream<RichCdcMultiplexRecord> routeDatabaseRecords(
-            DataStream<RichCdcMultiplexRecord> input,
-            TableNameConverter tableNameConverter,
-            Map<String, List<DataField>> primaryKeys,
-            boolean caseSensitive,
-            int parallelism) {
-        return routeRecords(
-                input,
-                new RecordKeySelector(null, tableNameConverter, primaryKeys, caseSensitive),
-                parallelism);
+                input, new RecordKeySelector(target, primaryKeys, caseSensitive), parallelism);
     }
 
     private static DataStream<RichCdcMultiplexRecord> routeRecords(
@@ -248,40 +157,24 @@ final class MySqlMultiSourceSupport {
     static final class RecordKeySelector implements KeySelector<RichCdcMultiplexRecord, Integer> {
         private static final long serialVersionUID = 1L;
 
-        @Nullable private final String fixedTarget;
-        @Nullable private final TableNameConverter tableNameConverter;
-        private final Map<String, List<DataField>> primaryKeys;
+        private final String target;
+        private final List<DataField> primaryKeys;
         private final boolean caseSensitive;
 
-        RecordKeySelector(
-                @Nullable String fixedTarget,
-                @Nullable TableNameConverter tableNameConverter,
-                Map<String, List<DataField>> primaryKeys,
-                boolean caseSensitive) {
-            this.fixedTarget = fixedTarget;
-            this.tableNameConverter = tableNameConverter;
-            this.primaryKeys = new HashMap<>();
-            primaryKeys.forEach(
-                    (table, keys) -> this.primaryKeys.put(table, new ArrayList<>(keys)));
+        RecordKeySelector(String target, List<DataField> primaryKeys, boolean caseSensitive) {
+            this.target = target;
+            this.primaryKeys = new ArrayList<>(primaryKeys);
             this.caseSensitive = caseSensitive;
         }
 
         @Override
         public Integer getKey(RichCdcMultiplexRecord record) {
-            String target =
-                    fixedTarget != null
-                            ? fixedTarget
-                            : tableNameConverter.convert(
-                                    Identifier.create(record.databaseName(), record.tableName()));
             int hash = target.hashCode();
             CdcRecord cdcRecord = record.toRichCdcRecord().toCdcRecord();
             Map<String, String> row =
                     caseSensitive ? cdcRecord.data() : cdcRecord.fieldNameLowerCase().data();
-            List<DataField> keys = primaryKeys.get(target);
-            // A table first discovered at runtime has no startup key definition. Route all its
-            // records to one partition instead of guessing keys or changing routing mid-stream.
-            // A later restart includes this table in discovery and enables primary-key routing.
-            if (keys != null && !row.isEmpty()) {
+            List<DataField> keys = primaryKeys;
+            if (!row.isEmpty()) {
                 Object[] values = new Object[keys.size()];
                 for (int i = 0; i < keys.size(); i++) {
                     DataField key = keys.get(i);

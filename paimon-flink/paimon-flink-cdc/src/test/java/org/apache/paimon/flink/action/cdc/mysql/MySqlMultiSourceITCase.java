@@ -58,7 +58,6 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
-import static org.apache.paimon.flink.action.MultiTablesSinkMode.COMBINED;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -219,7 +218,7 @@ public class MySqlMultiSourceITCase extends CdcActionITCaseBase {
     @Test
     @Timeout(240)
     public void testTableSnapshotDmlAndIndependentSchemaChanges() throws Exception {
-        JobClient job = startTable(sourceConfiguration(true), null);
+        JobClient job = startTable(sourceConfiguration(), null);
         awaitRows(
                 job,
                 tableName,
@@ -333,7 +332,7 @@ public class MySqlMultiSourceITCase extends CdcActionITCaseBase {
     @Test
     @Timeout(240)
     public void testTableSavepointRestoresSourceIdsAfterConfigurationReordering() throws Exception {
-        Map<String, String> options = sourceConfiguration(true);
+        Map<String, String> options = sourceConfiguration();
         JobClient job = startTableWithOrderedOptions(options, null);
         awaitRows(
                 job,
@@ -402,70 +401,7 @@ public class MySqlMultiSourceITCase extends CdcActionITCaseBase {
         assertIsolatedPrimaryKey(tableName);
     }
 
-    @Test
-    @Timeout(180)
-    public void testCombinedDatabaseDiscoversTablesIndependently() throws Exception {
-        execute(connectionA, "CREATE TABLE payments (id INT PRIMARY KEY, value_text VARCHAR(32))");
-        execute(connectionA, "INSERT INTO payments VALUES (1, 'a_payment')");
-        MySqlSyncDatabaseAction action =
-                new SyncDatabaseActionBuilder<MySqlSyncDatabaseAction>(
-                        MySqlSyncDatabaseAction.class,
-                        sourceConfiguration(false)) {}.withTableConfig(tableOptions())
-                        .includingTables("orders|payments|invoices")
-                        .withMode(COMBINED.configString())
-                        .build();
-        JobClient job = start(action, null);
-        awaitRows(job, "payments", COLUMNS, row("shard_a", "payments", 1, "a_payment"));
-        assertIsolatedPrimaryKey("payments");
-        awaitRows(
-                job,
-                "orders",
-                COLUMNS,
-                row("shard_a", "orders", 1, "a_initial"),
-                row("shard_b", "orders", 1, "b_initial"));
-
-        // Observe binlog-only marker writes from both sources before issuing CREATE TABLE.
-        execute(connectionA, "INSERT INTO orders VALUES (2, 'a_binlog')");
-        execute(connectionB, "INSERT INTO orders VALUES (2, 'b_binlog')");
-        awaitRows(
-                job,
-                "orders",
-                COLUMNS,
-                row("shard_a", "orders", 1, "a_initial"),
-                row("shard_a", "orders", 2, "a_binlog"),
-                row("shard_b", "orders", 1, "b_initial"),
-                row("shard_b", "orders", 2, "b_binlog"));
-
-        // The same logical table appears later on source B, targeting an existing Paimon table.
-        execute(connectionB, "CREATE TABLE payments (id INT PRIMARY KEY, value_text VARCHAR(32))");
-        execute(connectionB, "INSERT INTO payments VALUES (1, 'b_payment')");
-        awaitRows(
-                job,
-                "payments",
-                COLUMNS,
-                row("shard_a", "payments", 1, "a_payment"),
-                row("shard_b", "payments", 1, "b_payment"));
-        execute(connectionB, "DELETE FROM payments WHERE id = 1");
-        awaitRows(job, "payments", COLUMNS, row("shard_a", "payments", 1, "a_payment"));
-
-        // A wholly new target is created from source B's schema-change event at runtime.
-        execute(connectionB, "CREATE TABLE invoices (id INT PRIMARY KEY, value_text VARCHAR(32))");
-        execute(connectionB, "INSERT INTO invoices VALUES (1, 'b_invoice')");
-        awaitRows(job, "invoices", COLUMNS, row("shard_b", "invoices", 1, "b_invoice"));
-        assertIsolatedPrimaryKey("invoices");
-
-        execute(connectionA, "CREATE TABLE invoices (id INT PRIMARY KEY, value_text VARCHAR(32))");
-        execute(connectionA, "INSERT INTO invoices VALUES (1, 'a_invoice')");
-        awaitRows(
-                job,
-                "invoices",
-                COLUMNS,
-                row("shard_a", "invoices", 1, "a_invoice"),
-                row("shard_b", "invoices", 1, "b_invoice"));
-        assertIsolatedPrimaryKey("invoices");
-    }
-
-    private Map<String, String> sourceConfiguration(boolean tableSync) {
+    private Map<String, String> sourceConfiguration() {
         Map<String, String> options = new LinkedHashMap<>();
         options.put("username", USER);
         options.put("password", PASSWORD);
@@ -473,9 +409,7 @@ public class MySqlMultiSourceITCase extends CdcActionITCaseBase {
         options.put("server-time-zone", "UTC");
         options.put("scan.incremental.snapshot.chunk.size", "2");
         options.put("scan.newly-added-table.enabled", "false");
-        if (tableSync) {
-            options.put("table-name", "orders");
-        }
+        options.put("table-name", "orders");
         options.put("source.shard_a.hostname", hostA);
         options.put("source.shard_a.port", Integer.toString(portA));
         options.put("source.shard_a.server-id", "5400-5403");
@@ -570,7 +504,7 @@ public class MySqlMultiSourceITCase extends CdcActionITCaseBase {
                     }
                 }
             } catch (Catalog.TableNotExistException ignored) {
-                // COMBINED mode creates tables after observing their source schema.
+                // The source job may not yet have produced a committed snapshot.
             }
             Thread.sleep(200);
         }
