@@ -30,6 +30,7 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.apache.paimon.flink.action.cdc.CdcActionCommonUtils.buildPaimonSchema;
+import static org.apache.paimon.flink.action.cdc.CdcActionCommonUtils.listCaseConvert;
 import static org.apache.paimon.utils.Preconditions.checkArgument;
 
 /** Build schema for new table found in database synchronization. */
@@ -45,6 +46,7 @@ public class NewTableSchemaBuilder implements Serializable {
     private final Map<String, List<String>> partitionKeyMultiple;
     private List<String> primaryKeyPrefix = Collections.emptyList();
     private boolean strictlyCheckSpecified = false;
+    private boolean validateTableSchema = false;
 
     public NewTableSchemaBuilder(
             Map<String, String> tableConfig,
@@ -75,6 +77,35 @@ public class NewTableSchemaBuilder implements Serializable {
     public NewTableSchemaBuilder withStrictlyCheckSpecified(boolean strictlyCheckSpecified) {
         this.strictlyCheckSpecified = strictlyCheckSpecified;
         return this;
+    }
+
+    /** Also validates physical shards mapped to a table that already exists. */
+    public NewTableSchemaBuilder withTableSchemaValidation(boolean validateTableSchema) {
+        this.validateTableSchema = validateTableSchema;
+        return this;
+    }
+
+    /** Resolves the same key policy as table creation without consulting the created-table cache. */
+    public Optional<Schema> buildForValidation(RichCdcMultiplexRecord record) {
+        if (!validateTableSchema) {
+            return Optional.empty();
+        }
+        Optional<Schema> expected = build(record);
+        expected.ifPresent(
+                schema -> {
+                    List<String> sourceKeys =
+                            listCaseConvert(record.cdcSchema().primaryKeys(), caseSensitive);
+                    checkArgument(
+                            !sourceKeys.isEmpty() && schema.primaryKeys().containsAll(sourceKeys),
+                            "Physical source table '%s.%s' has primary keys %s, but the resolved "
+                                    + "target primary keys %s do not retain them. Explicit primary "
+                                    + "keys must not discard a physical shard's uniqueness.",
+                            record.databaseName(),
+                            record.tableName(),
+                            sourceKeys,
+                            schema.primaryKeys());
+                });
+        return expected;
     }
 
     public Optional<Schema> build(RichCdcMultiplexRecord record) {

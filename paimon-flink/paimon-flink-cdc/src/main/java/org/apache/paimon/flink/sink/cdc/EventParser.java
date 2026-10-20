@@ -19,6 +19,8 @@
 package org.apache.paimon.flink.sink.cdc;
 
 import org.apache.paimon.annotation.Experimental;
+import org.apache.paimon.catalog.Catalog;
+import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.types.DataField;
 
@@ -64,6 +66,12 @@ public interface EventParser<T> {
     default Optional<Schema> parseNewTable() {
         return Optional.empty();
     }
+
+    /**
+     * Validate the current event against the actual target after table creation and before emitting
+     * schema changes or records. Parsers opt in; existing implementations retain their behavior.
+     */
+    default void validateTableSchema(Catalog catalog, Identifier identifier) throws Exception {}
 
     /** Factory to create an {@link EventParser}. */
     interface Factory<T> extends Serializable {

@@ -141,7 +141,7 @@ final class MySqlMultiSourceSupport {
 
     static NewTableSchemaBuilder withPrimaryKeyMode(
             NewTableSchemaBuilder builder, boolean isolated) {
-        builder.withStrictlyCheckSpecified(true);
+        builder.withStrictlyCheckSpecified(true).withTableSchemaValidation(true);
         return isolated ? builder.withPrimaryKeyPrefix(SOURCE_IDENTITY_COLUMNS) : builder;
     }
 
