@@ -67,6 +67,11 @@ public abstract class DelegateCatalog implements Catalog {
     }
 
     @Override
+    public <T extends Catalog> Optional<T> unwrap(Class<T> type) {
+        return type.isInstance(this) ? Optional.of(type.cast(this)) : wrapped.unwrap(type);
+    }
+
+    @Override
     public boolean caseSensitive() {
         return wrapped.caseSensitive();
     }

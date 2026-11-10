@@ -77,11 +77,12 @@ public class CloneAction extends ActionBase {
                         "Parameter 'target_table_conf' is only supported when clone_from is paimon.");
             }
 
-            Catalog sourceCatalog = catalog;
-            if (sourceCatalog instanceof CachingCatalog) {
-                sourceCatalog = ((CachingCatalog) sourceCatalog).wrapped();
-            }
-            if (!(sourceCatalog instanceof HiveCatalog)) {
+            if (!catalog.unwrap(HiveCatalog.class).isPresent()) {
+                // Preserve the catalog type reported by the existing error message.
+                Catalog sourceCatalog =
+                        catalog instanceof CachingCatalog
+                                ? ((CachingCatalog) catalog).wrapped()
+                                : catalog;
                 throw new UnsupportedOperationException(
                         "Only support clone hive tables using HiveCatalog, but current source catalog is "
                                 + sourceCatalog.getClass().getName());

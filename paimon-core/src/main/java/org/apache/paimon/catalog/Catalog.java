@@ -1373,6 +1373,26 @@ public interface Catalog extends AutoCloseable {
 
     // ==================== Catalog Information ==========================
 
+    /**
+     * Returns the first catalog of the requested type, searching from this catalog inwards through
+     * any wrappers.
+     *
+     * <p>The default implementation checks only this catalog. Wrappers should first check
+     * themselves and then delegate to their wrapped catalog, as {@link DelegateCatalog} does.
+     *
+     * <p>The returned catalog is an existing instance. Unwrapping does not create, reconfigure or
+     * close catalogs, and does not transfer ownership of their lifecycle to the caller.
+     *
+     * @param type the catalog type to look up; must not be null
+     * @param <T> the requested catalog type
+     * @return the first matching catalog, or an empty optional if no catalog matches
+     * @throws NullPointerException if {@code type} is null
+     * @since 2.2.0
+     */
+    default <T extends Catalog> Optional<T> unwrap(Class<T> type) {
+        return type.isInstance(this) ? Optional.of(type.cast(this)) : Optional.empty();
+    }
+
     /** Catalog options for re-creating this catalog. */
     Map<String, String> options();
 

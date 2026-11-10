@@ -135,12 +135,15 @@ public class CloneHiveTableUtils {
     }
 
     public static HiveCatalog getRootHiveCatalog(Catalog catalog) {
-        Catalog rootCatalog = DelegateCatalog.rootCatalog(catalog);
-        checkArgument(
-                rootCatalog instanceof HiveCatalog,
-                "Only support HiveCatalog now but found %s.",
-                rootCatalog.getClass().getName());
-        return (HiveCatalog) rootCatalog;
+        return catalog.unwrap(HiveCatalog.class)
+                .orElseThrow(
+                        () ->
+                                new IllegalArgumentException(
+                                        String.format(
+                                                "Only support HiveCatalog now but found %s.",
+                                                DelegateCatalog.rootCatalog(catalog)
+                                                        .getClass()
+                                                        .getName())));
     }
 
     public static void build(
